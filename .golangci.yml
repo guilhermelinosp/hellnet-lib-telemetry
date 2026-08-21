@@ -28,8 +28,8 @@ linters:
           severity: warning
   exclusions:
     paths:
-      - "**/*_test.go"
-      - "_examples/**"
+      - "_test\\.go$"
+      - "^_examples/"
 
 formatters:
   enable:
