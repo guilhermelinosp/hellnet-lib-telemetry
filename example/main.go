@@ -14,7 +14,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to init telemetry: %v", err)
 	}
-	defer ops.Shutdown()
+	defer func() { _ = ops.Shutdown() }()
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /live", ops.Live())
