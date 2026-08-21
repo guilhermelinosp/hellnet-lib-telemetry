@@ -35,9 +35,6 @@ formatters:
   enable:
     - gofmt
     - goimports
-  settings:
-    goimports:
-      local-prefix: github.com/guilhermelinosp/hellnet-lib-telemetry
 
 issues:
   max-issues-per-linter: 0
