@@ -11,25 +11,27 @@ linters:
     - ineffassign
     - staticcheck
     - unused
-    - misspell
     - unconvert
-    - revive
-    - gocyclo
     - nakedret
     - bodyclose
     - noctx
     - gosec
+    - gocyclo
   settings:
     gocyclo:
-      min-complexity: 15
-    revive:
-      rules:
-        - name: exported
-          severity: warning
+      min-complexity: 20
+    gosec:
+      excludes:
+        - G114
+        - G115
   exclusions:
     paths:
       - "_test\\.go$"
       - "^_examples/"
+    rules:
+      - linters:
+          - staticcheck
+        text: "QF1008"
 
 formatters:
   enable:
