@@ -287,7 +287,7 @@ func checkOTLPReachable(ctx context.Context, endpoint string) error {
 	if err != nil {
 		return err
 	}
-	conn.Close()
+	_ = conn.Close()
 	return nil
 }
 
@@ -313,7 +313,7 @@ func parseOTLPEndpoint(endpoint, defaultPort string) (host, port string, err err
 func writeHealth(w http.ResponseWriter, code int, status HealthStatus) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(status)
+	_ = json.NewEncoder(w).Encode(status)
 }
 
 // ─────────────────────────── Middleware ──────────────────────────
