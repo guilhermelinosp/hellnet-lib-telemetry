@@ -35,7 +35,7 @@ import (
 	"sync"
 	"time"
 
-	environments "github.com/guilhermelinosp/hellnet-lib-environments"
+	environments "github.com/guilhermelinosp/hellnet-lib-environments/environments"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
