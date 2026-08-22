@@ -46,5 +46,3 @@ require (
 	google.golang.org/grpc v1.83.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
-
-replace github.com/guilhermelinosp/hellnet-lib-environments => ../hellnet-lib-environments
