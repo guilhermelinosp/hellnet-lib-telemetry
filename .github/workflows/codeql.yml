@@ -31,12 +31,8 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
-          build-mode: manual
+          build-mode: autobuild
           queries: +security-and-quality
-          # build-command explícito evita o fallback do autobuild para `make`,
-          # que rodaria o target `lint` (golangci-lint) — não instalado no
-          # runner do CodeQL → "Error 127". CodeQL analisa via go build direto.
-          build-command: go build ./...
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
