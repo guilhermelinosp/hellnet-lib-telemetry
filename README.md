@@ -43,12 +43,17 @@ func main() {
 
 ## Required environment variables
 
+A lib aceita o prefixo **`HELLNET_TELEMETRY_*`** (padrão hellnet) ou o antigo
+**`HELLNET_*`** (fallback de retrocompatibilidade). Ambos funcionam.
+
 | Variable | Example | Description |
 |---|---|---|
-| `HELLNET_SERVICE` | `order-api` | Service identifier (required) |
-| `HELLNET_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (required) |
-| `HELLNET_PORT` | `4318` | OTLP collector port (required; compõe `HELLNET_ENDPOINT:HELLNET_PORT`) |
-| `HELLNET_ENVIRONMENT` | `Development` | Ambiente obrigatório (dev/prod); controla `.env` loading |
+| `HELLNET_TELEMETRY_SERVICE` | `order-api` | Service identifier (required) |
+| `HELLNET_TELEMETRY_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (required). **A porta deve vir junto do endpoint** (ex.: `:4318` ou `:443`); não há variável de porta separada. Se a porta for omitida, é inferida do scheme (443 p/ https, 80 p/ http) |
+| `HELLNET_TELEMETRY_ENVIRONMENT` | `Development` | Ambiente (**opcional**); controla `.env` loading. Ausente = tratado como dev |
+
+> Apenas `SERVICE` e `ENDPOINT` são obrigatórios. A porta **não** é configurável via env separada — ela vive no `ENDPOINT`.
+> Arquivo `.env` explícito: `HELLNET_TELEMETRY_ENV_FILE` (ou `HELLNET_ENV_FILE`).
 
 ---
 
@@ -205,10 +210,10 @@ tel.Meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 	return nil
 }, activeConns)
 
-// Gauge / Timer (atalho histograma em ms)
+// Gauge (atalho int64)
 queueGauge, _ := tel.Meter.Gauge("queue.depth")
 queueGauge.Record(ctx, int64(q))
-hist, _ := tel.Meter.Timer("http_duration_ms")
+hist, _ := tel.Meter.Histogram("http_duration_ms")
 defer func(start time.Time) { hist.Record(ctx, time.Since(start).Milliseconds()) }(time.Now())
 ```
 
@@ -302,7 +307,7 @@ Conjunto detalhado (`runtime/metrics`, nível prometheus-net):
 > `process_threads` dependem de `/proc` e **só são emitidos em Linux**. Em macOS
 > (dev) elas ficam ausentes; aparecem normalmente no deploy Linux.
 
-Desligue com `opts.DisableRuntimeMetrics` (ou force com `opts.EnableRuntimeMetrics`).
+Desligue com `opts.RuntimeMetrics = false`.
 
 ### Exemplo de queries (PromQL)
 
@@ -476,7 +481,9 @@ func main() {
 
 - Verifica `HELLNET_ENVIRONMENT` (obrigatório)
 - Só carrega se valor for `Development`/`development`
-- Usa `HELLNET_ENV_FILE` ou `./.env` por padrão
+- Usa `HELLNET_ENV_FILE` ou o `.env` do **mesmo diretório do executável**
+  (onde `main` reside) — resolve via `os.Executable()`. Se não houver `.env`
+  ao lado do binário, faz fallback para o diretório corrente (`os.Getwd()`).
 - **Não sobrescreve** env vars existentes
 
 ---
@@ -538,14 +545,14 @@ tracing estão desligados, os acessores retornam implementações noop (nunca `n
 | `tel.MetricsHandler()` | `http.Handler` Prometheus `/metrics` |
 | `tel.WithSpan(ctx, name, fn)` | Span + erro automático + `exceptions_total` em panic |
 | `tel.Tracer.Start(ctx, name)` | Cria span de trace |
-| `tel.Meter.Counter/Gauge/Histogram/Timer(name)` | Atalhos int64 de métrica |
+| `tel.Meter.Counter/Gauge/Histogram(name)` | Atalhos int64 de métrica |
 | `tel.Logger.InfoContext/ErrorContext(...)` | Logging estruturado (stdout + OTLP) |
 | `tel.Worker(ctx, job, fn, extra...)` | Job/worker: span + `worker_*` metrics |
 | `tel.HTTPClient(base)` | `*http.Client` com métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
 | `tel.Shutdown()` | Flush OTLP + Prometheus |
 | `opts.RedactSensitive` / `opts.RedactKeys` | Mascara PII nos logs |
-| `opts.EnableRuntimeMetrics` / `opts.DisableRuntimeMetrics` | Liga/desliga runtime metrics (default ligado) |
+| `opts.RuntimeMetrics` | Liga/desliga runtime metrics (default ligado) |
 | `opts.PrometheusExporter` | Liga `/metrics` (default `true`) |
 | `opts.RegisterGlobals` | Registra providers no estado global otel/slog |
 

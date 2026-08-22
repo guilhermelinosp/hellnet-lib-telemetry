@@ -25,11 +25,11 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	rtm "runtime/metrics"
 	"strconv"
 	"strings"
 	"sync"
@@ -100,17 +100,12 @@ type Options struct {
 	// (recomendado para DI/mock). Quando true, reproduz o comportamento anterior.
 	RegisterGlobals bool
 
-	// EnableRuntimeMetrics liga o conjunto padrão de métricas de runtime/processo
+	// RuntimeMetrics liga o conjunto padrão de métricas de runtime/processo
 	// (memória, GC, CPU, goroutines, fd, threads, uptime) — ver startRuntimeMetrics.
 	//
 	// Por padrão (prometheus-net-like) esse conjunto JÁ VEM LIGADO quando
-	// Enabled=true. Use DisableRuntimeMetrics para desligar, ou EnableRuntimeMetrics
-	// para forçar ligado de forma explícita.
-	EnableRuntimeMetrics bool
-
-	// DisableRuntimeMetrics desliga o conjunto padrão de runtime metrics quando
-	// Enabled=true. Opt-out do comportamento padrão (ligado).
-	DisableRuntimeMetrics bool
+	// Enabled=true. Passe RuntimeMetrics: false para desligá-lo de forma explícita.
+	RuntimeMetrics bool
 
 	// RedactSensitive mascara valores de atributos sensíveis nos logs
 	// (password, token, secret, authorization, etc.). Veja defaultSensitiveKeys.
@@ -129,12 +124,37 @@ type Options struct {
 	PrometheusExporter bool
 }
 
-// Default returns options populated from HELLNET_* env vars.
-// Lê HELLNET_SERVICE, HELLNET_ENDPOINT e compõe o endereço OTLP com
-// HELLNET_PORT (quando presente): HELLNET_ENDPOINT[:HELLNET_PORT].
+// envPrefixes define a ordem de preferência dos prefixos de env var lidas pela
+// lib. O padrão hellnet é HELLNET_TELEMETRY_*; HELLNET_* é mantido por
+// retrocompatibilidade (fallback). firstEnv retorna o primeiro não-vazio.
+const (
+	envPrefixNew = "HELLNET_TELEMETRY_"
+	envPrefixOld = "HELLNET_"
+)
+
+// firstEnv retorna o valor da primeira env var não-vazia em names; "" se nenhuma.
+func firstEnv(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// envKey resolve o nome canônico de uma env dada a sua suffix (ex.: "SERVICE")
+// tentando o prefixo novo e depois o antigo.
+func envKey(suffix string) string {
+	return firstEnv(envPrefixNew+suffix, envPrefixOld+suffix)
+}
+
+// Default returns options populated from HELLNET_TELEMETRY_* env vars
+// (fallback para HELLNET_* por retrocompatibilidade).
+// Lê SERVICE, ENDPOINT e compõe o endereço OTLP com
+// PORT (quando presente): ENDPOINT[:PORT].
 func Default() Options {
 	return Options{
-		ServiceName:        os.Getenv("HELLNET_SERVICE"),
+		ServiceName:        envKey("SERVICE"),
 		OTLPEndpoint:       otlpEndpointFromEnv(),
 		LogLevel:           slog.LevelInfo,
 		Enabled:            true,
@@ -142,16 +162,18 @@ func Default() Options {
 	}
 }
 
-// Validate garante o contrato obrigatório de envs HELLNET_*. Deve ser chamado
+// Validate garante o contrato mínimo obrigatório: SERVICE e ENDPOINT.
+// PORT e ENVIRONMENT são opcionais (ENDPOINT pode já carregar a porta;
+// ENVIRONMENT ausente é tratado como dev pelo Loading). Aceita prefixo
+// HELLNET_TELEMETRY_* (preferido) ou HELLNET_* (fallback). Deve ser chamado
 // por apps reais (ex.: example) antes de New(); New() permanece flexível para
-// uso em testes/embedded. Retorna erro listando todas as envs faltantes.
+// uso em testes/embedded. Retorna erro listando as envs faltantes.
 func (o Options) Validate() error {
+	required := []string{"SERVICE", "ENDPOINT"}
 	var missing []string
-	for _, name := range []string{
-		"HELLNET_SERVICE", "HELLNET_ENDPOINT", "HELLNET_PORT", "HELLNET_ENVIRONMENT",
-	} {
-		if os.Getenv(name) == "" {
-			missing = append(missing, name)
+	for _, suffix := range required {
+		if envKey(suffix) == "" {
+			missing = append(missing, envPrefixNew+suffix)
 		}
 	}
 	if len(missing) > 0 {
@@ -160,22 +182,44 @@ func (o Options) Validate() error {
 	return nil
 }
 
-// otlpEndpointFromEnv compõe o endereço OTLP a partir de HELLNET_ENDPOINT
-// (obrigatório) e HELLNET_PORT (opcional): HELLNET_ENDPOINT[:HELLNET_PORT].
+// otlpEndpointFromEnv retorna o ENDPOINT OTLP tal como configurado. A porta
+// deve vir junto do próprio ENDPOINT (ex.: https://collector:443); não há
+// variável de porta separada — a lib não aceita HELLNET_*_PORT.
 func otlpEndpointFromEnv() string {
-	endpoint := os.Getenv("HELLNET_ENDPOINT")
-	if endpoint == "" {
-		return ""
+	return envKey("ENDPOINT")
+}
+
+// otlpSignalURL retorna a URL completa de um sinal OTLP (traces/metrics/logs)
+// anexando o path do signal quando o ENDPOINT base não traz path. Versões
+// recentes do exporter OTel HTTP (v1.45+) NÃO anexam /v1/traces automaticamente
+// quando se usa WithEndpointURL com URL sem path — elas normalizam para "/",
+// causando 404 no collector. Por isso anexamos o path do signal aqui.
+func otlpSignalURL(base, signalPath string) string {
+	if base == "" {
+		return base
 	}
-	if port := os.Getenv("HELLNET_PORT"); port != "" {
-		return endpoint + ":" + port
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		return base
 	}
-	return endpoint
+	if u.Path == "" || u.Path == "/" {
+		u.Path = signalPath
+	}
+	return u.String()
 }
 
 // New creates a fully initialized Telemetry instance.
-// Sem argumentos, carrega telemetry.Default() (env HELLNET_*).
+// Sem argumentos, carrega o .env (via exeDir) + valida as envs HELLNET_*
+// obrigatórias (fail-fast) e usa telemetry.Default(). Com Options explícitas,
+// usa-as diretamente (sem exigir .env/env — útil em testes/embed).
 func New(opts ...Options) (*Telemetry, error) {
+	// Quando configurado via ambiente (sem Options), carrega .env + valida.
+	if len(opts) == 0 {
+		if err := loadEnv(); err != nil {
+			return nil, err
+		}
+	}
+
 	o := Default()
 	if len(opts) > 0 {
 		o = opts[0]
@@ -205,74 +249,17 @@ func New(opts ...Options) (*Telemetry, error) {
 		otlpEndpoint: o.OTLPEndpoint,
 	}
 
-	// ── Logging (stdout + OTLP → Loki) ────────────────────────────────
+	// ── Logging / Tracing / Metrics ───────────────────────────────────
 	if o.Enabled {
-		lp, err := newLoggerProvider(o, res)
-		if err != nil {
+		if err := tel.buildLogger(o, res); err != nil {
 			return nil, err
 		}
-		tel.lp = lp
-
-		// stdout JSON handler (enriquecido com trace_id/span_id p/ correlação)
-		var stdoutHandler slog.Handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-			Level: o.LogLevel,
-		})
-		if o.RedactSensitive || len(o.RedactKeys) > 0 {
-			stdoutHandler = redactHandler{stdoutHandler, redactKeys(o)}
-		}
-		stdoutHandler = contextTraceHandler{stdoutHandler}
-
-		// OTel bridge handler (sends via OTLP → Alloy → Loki)
-		var otelHandler slog.Handler = otelslog.NewHandler("otel", otelslog.WithLoggerProvider(lp))
-		if o.RedactSensitive || len(o.RedactKeys) > 0 {
-			otelHandler = redactHandler{otelHandler, redactKeys(o)}
-		}
-
-		// MultiHandler: writes to BOTH stdout AND OTLP; errorCountHandler
-		// conta erros logados automaticamente (log_errors_total).
-		tel.Logger = slog.New(&errorCountHandler{Handler: slog.NewMultiHandler(stdoutHandler, otelHandler), tel: tel})
-		if o.RegisterGlobals {
-			slog.SetDefault(tel.Logger)
-		}
-	}
-
-	// ── Tracing ───────────────────────────────────────────────────────
-	if o.Enabled {
-		tp, err := newTracerProvider(o, res)
-		if err != nil {
+		if err := tel.buildTracer(o, res); err != nil {
 			return nil, err
 		}
-		tel.tp = tp
-		tel.Tracer = tp.Tracer(o.ServiceName)
-		if o.RegisterGlobals {
-			otel.SetTracerProvider(tp)
-			otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-				propagation.TraceContext{},
-				propagation.Baggage{},
-			))
-		}
-	}
-
-	// ── Metrics ───────────────────────────────────────────────────────
-	if o.Enabled {
-		mp, promReg, err := newMeterProvider(o, res)
-		if err != nil {
+		if err := tel.buildMeter(o, res); err != nil {
 			return nil, err
 		}
-		tel.mp = mp
-		tel.promRegistry = promReg
-		tel.Meter = meterAdapter{mp.Meter(o.ServiceName)}
-		if o.RegisterGlobals {
-			otel.SetMeterProvider(mp)
-		}
-		// Runtime metrics são LIGADAS POR PADÃO (estilo prometheus-net):
-		// EnableRuntimeMetrics força ligado; DisableRuntimeMetrics força desligado;
-		// nenhum dos dois => ligado.
-		if o.EnableRuntimeMetrics || !o.DisableRuntimeMetrics {
-			tel.startRuntimeMetrics()
-			tel.startRuntimeMetricsExtra()
-		}
-		tel.registerHealthMetrics()
 	}
 
 	// Abstração de metrics (tel.Meter) — nunca nil (noop se metrics desligado).
@@ -281,6 +268,78 @@ func New(opts ...Options) (*Telemetry, error) {
 	}
 
 	return tel, nil
+}
+
+// buildLogger monta o Logger (stdout JSON + OTLP → Loki) com redação e
+// enriquecimento de trace_id/span_id, registrando o erro-count handler.
+func (t *Telemetry) buildLogger(o Options, res *sdkresource.Resource) error {
+	lp, err := newLoggerProvider(o, res)
+	if err != nil {
+		return err
+	}
+	t.lp = lp
+
+	// stdout JSON handler (enriquecido com trace_id/span_id p/ correlação)
+	var stdoutHandler slog.Handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: o.LogLevel,
+	})
+	if o.RedactSensitive || len(o.RedactKeys) > 0 {
+		stdoutHandler = redactHandler{stdoutHandler, redactKeys(o)}
+	}
+	stdoutHandler = contextTraceHandler{stdoutHandler}
+
+	// OTel bridge handler (sends via OTLP → Alloy → Loki)
+	var otelHandler slog.Handler = otelslog.NewHandler("otel", otelslog.WithLoggerProvider(lp))
+	if o.RedactSensitive || len(o.RedactKeys) > 0 {
+		otelHandler = redactHandler{otelHandler, redactKeys(o)}
+	}
+
+	// MultiHandler: writes to BOTH stdout AND OTLP; errorCountHandler
+	// conta erros logados automaticamente (log_errors_total).
+	t.Logger = slog.New(&errorCountHandler{Handler: slog.NewMultiHandler(stdoutHandler, otelHandler), tel: t})
+	if o.RegisterGlobals {
+		slog.SetDefault(t.Logger)
+	}
+	return nil
+}
+
+// buildTracer monta o TracerProvider e o propagador de contexto (opt-in global).
+func (t *Telemetry) buildTracer(o Options, res *sdkresource.Resource) error {
+	tp, err := newTracerProvider(o, res)
+	if err != nil {
+		return err
+	}
+	t.tp = tp
+	t.Tracer = tp.Tracer(o.ServiceName)
+	if o.RegisterGlobals {
+		otel.SetTracerProvider(tp)
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+			propagation.TraceContext{},
+			propagation.Baggage{},
+		))
+	}
+	return nil
+}
+
+// buildMeter monta o MeterProvider (OTLP + Prometheus), os runtime metrics e
+// as métricas de health check. Runtime metrics vêm ligadas por padrão
+// (estilo prometheus-net); passe RuntimeMetrics: false para desligar.
+func (t *Telemetry) buildMeter(o Options, res *sdkresource.Resource) error {
+	mp, promReg, err := newMeterProvider(o, res)
+	if err != nil {
+		return err
+	}
+	t.mp = mp
+	t.promRegistry = promReg
+	t.Meter = meterAdapter{mp.Meter(o.ServiceName)}
+	if o.RegisterGlobals {
+		otel.SetMeterProvider(mp)
+	}
+	if o.RuntimeMetrics {
+		t.startRuntimeMetrics()
+	}
+	t.registerHealthMetrics()
+	return nil
 }
 
 // Shutdown flushes telemetry data and cleans up resources with a 5s timeout.
@@ -503,111 +562,6 @@ func (t *Telemetry) startRuntimeMetrics() {
 	)
 }
 
-// startRuntimeMetricsExtra registra métricas adicionais via o pacote moderno
-// runtime/metrics, complementando startRuntimeMetrics (que usa runtime.MemStats):
-// classes detalhadas de memória (mcache, stacks, metadata, profiling), meta de
-// GC (goal/limit) e o breakdown de CPU por classe de GC (mark/sweep × assist/
-// dedicated/idle) + contenção de mutex. Tudo automático, sem código do utilizador.
-func (t *Telemetry) startRuntimeMetricsExtra() {
-	m := t.Meter
-
-	// uint64: bytes / contagens do runtime/metrics.
-	uintSpecs := []struct {
-		rtName, otName, help string
-	}{
-		{"/gc/heap/live:bytes", "process_heap_live_bytes", "Bytes of live heap objects (currently allocated)"},
-		{"/memory/classes/heap/free:bytes", "process_heap_free_bytes", "Bytes of unused (free) heap memory"},
-		{"/gc/heap/goal:bytes", "process_gc_heap_goal_bytes", "Heap size target at the end of the GC cycle"},
-		{"/gc/heap/limit:bytes", "process_gc_heap_limit_bytes", "Heap size limit (0 = unlimited)"},
-		{"/memory/classes/heap/objects:bytes", "process_mem_heap_objects_bytes", "Bytes of allocated heap objects"},
-		{"/memory/classes/heap/stacks:bytes", "process_mem_heap_stacks_bytes", "Bytes of heap used for goroutine stacks"},
-		{"/memory/classes/metadata/mcache/free:bytes", "process_mem_metadata_mcache_free_bytes", "Bytes of freed mcache structures"},
-		{"/memory/classes/metadata/mcache/inuse:bytes", "process_mem_metadata_mcache_inuse_bytes", "Bytes of in-use mcache structures"},
-		{"/memory/classes/metadata/other:bytes", "process_mem_metadata_other_bytes", "Bytes of other runtime metadata"},
-		{"/memory/classes/os-stacks:bytes", "process_mem_os_stacks_bytes", "Bytes of OS thread stacks"},
-		{"/memory/classes/other:bytes", "process_mem_other_bytes", "Bytes of other memory"},
-		{"/memory/classes/profiling/buckets:bytes", "process_mem_profiling_buckets_bytes", "Bytes of profiling buckets"},
-	}
-
-	// float64: tempos acumulados (segundos) do runtime/metrics.
-	floatSpecs := []struct {
-		rtName, otName, help string
-	}{
-		{"/sync/mutex/wait/total:seconds", "process_mutex_wait_seconds_total", "Total time goroutines spent blocked on mutexes"},
-		{"/sync/mutex/lock/total:seconds", "process_mutex_lock_seconds_total", "Total time spent acquiring mutexes"},
-		{"/cpu/classes/gc/total:cpu-seconds", "process_cpu_gc_seconds_total", "Cumulative CPU seconds spent in GC"},
-		{"/cpu/classes/gc/mark/assist:cpu-seconds", "process_cpu_gc_mark_assist_seconds_total", "Cumulative CPU seconds in GC mark assists"},
-		{"/cpu/classes/gc/mark/dedicated:cpu-seconds", "process_cpu_gc_mark_dedicated_seconds_total", "Cumulative CPU seconds in dedicated GC mark workers"},
-		{"/cpu/classes/gc/mark/idle:cpu-seconds", "process_cpu_gc_mark_idle_seconds_total", "Cumulative CPU seconds in idle GC mark workers"},
-		{"/cpu/classes/gc/sweep/assist:cpu-seconds", "process_cpu_gc_sweep_assist_seconds_total", "Cumulative CPU seconds in GC sweep assists"},
-		{"/cpu/classes/gc/sweep/dedicated:cpu-seconds", "process_cpu_gc_sweep_dedicated_seconds_total", "Cumulative CPU seconds in dedicated GC sweep workers"},
-		{"/cpu/classes/gc/sweep/idle:cpu-seconds", "process_cpu_gc_sweep_idle_seconds_total", "Cumulative CPU seconds in idle GC sweep workers"},
-		{"/cpu/classes/scavenge/total:cpu-seconds", "process_cpu_scavenge_seconds_total", "Cumulative CPU seconds in heap scavenging"},
-		{"/cpu/classes/total:cpu-seconds", "process_cpu_total_seconds_total", "Cumulative total CPU seconds consumed by the process"},
-		{"/cpu/classes/user:cpu-seconds", "process_cpu_user_seconds_total", "Cumulative user-mode CPU seconds"},
-		{"/cpu/classes/idle:cpu-seconds", "process_cpu_idle_seconds_total", "Cumulative idle CPU seconds"},
-	}
-
-	uintInsts := make([]metric.Int64ObservableGauge, len(uintSpecs))
-	uintNames := make([]string, len(uintSpecs))
-	for i, s := range uintSpecs {
-		uintInsts[i], _ = m.Int64ObservableGauge(s.otName, metric.WithDescription(s.help))
-		uintNames[i] = s.rtName
-	}
-	floatInsts := make([]metric.Float64ObservableGauge, len(floatSpecs))
-	floatNames := make([]string, len(floatSpecs))
-	for i, s := range floatSpecs {
-		floatInsts[i], _ = m.Float64ObservableGauge(s.otName, metric.WithDescription(s.help))
-		floatNames[i] = s.rtName
-	}
-
-	allObs := make([]metric.Observable, 0, len(uintInsts)+len(floatInsts))
-	for _, ins := range uintInsts {
-		allObs = append(allObs, ins)
-	}
-	for _, ins := range floatInsts {
-		allObs = append(allObs, ins)
-	}
-
-	_, _ = m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
-		us := make([]rtm.Sample, len(uintNames))
-		for i, n := range uintNames {
-			us[i].Name = n
-		}
-		rtm.Read(us)
-		for i, ins := range uintInsts {
-			o.ObserveInt64(ins, int64(uint64OrZero(us[i].Value)))
-		}
-
-		fs := make([]rtm.Sample, len(floatNames))
-		for i, n := range floatNames {
-			fs[i].Name = n
-		}
-		rtm.Read(fs)
-		for i, ins := range floatInsts {
-			o.ObserveFloat64(ins, float64OrZero(fs[i].Value))
-		}
-		return nil
-	}, allObs...)
-}
-
-// uint64OrZero extrai um valor uint64 de uma runtime/metrics.Sample, tolerando
-// métricas indisponíveis (Kind != Uint64) sem panic.
-func uint64OrZero(v rtm.Value) uint64 {
-	if v.Kind() == rtm.KindUint64 {
-		return v.Uint64()
-	}
-	return 0
-}
-
-// float64OrZero extrai um valor float64 de uma runtime/metrics.Value.
-func float64OrZero(v rtm.Value) float64 {
-	if v.Kind() == rtm.KindFloat64 {
-		return v.Float64()
-	}
-	return 0
-}
-
 // readProcessCPUNs retorna o tempo de CPU (usuário + sistema) do processo em
 // nanosegundos, lendo /proc/self/stat (Linux). Em outras plataformas retorna
 // erro e a métrica de CPU (process_cpu_usage_*) simplesmente não é emitida —
@@ -754,8 +708,7 @@ func (h *errorCountHandler) WithGroup(name string) slog.Handler {
 func newLoggerProvider(opts Options, res *sdkresource.Resource) (*sdklog.LoggerProvider, error) {
 	exporter, err := otlploghttp.New(
 		context.Background(),
-		otlploghttp.WithEndpointURL(opts.OTLPEndpoint),
-		otlploghttp.WithURLPath("/v1/logs"),
+		otlploghttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/logs")),
 		otlploghttp.WithTimeout(5*time.Second),
 	)
 	if err != nil {
@@ -768,7 +721,6 @@ func newLoggerProvider(opts Options, res *sdkresource.Resource) (*sdklog.LoggerP
 			exporter,
 			sdklog.WithExportInterval(1*time.Second),
 			sdklog.WithExportMaxBatchSize(10),
-			sdklog.WithExportBufferSize(100),
 		)),
 	)
 	return lp, nil
@@ -779,7 +731,7 @@ func newLoggerProvider(opts Options, res *sdkresource.Resource) (*sdklog.LoggerP
 func newTracerProvider(opts Options, res *sdkresource.Resource) (*sdktrace.TracerProvider, error) {
 	exporter, err := otlptracehttp.New(
 		context.Background(),
-		otlptracehttp.WithEndpointURL(opts.OTLPEndpoint),
+		otlptracehttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/traces")),
 	)
 	if err != nil {
 		return nil, err
@@ -797,7 +749,7 @@ func newTracerProvider(opts Options, res *sdkresource.Resource) (*sdktrace.Trace
 func newMeterProvider(opts Options, res *sdkresource.Resource) (*sdkmetric.MeterProvider, *prometheus.Registry, error) {
 	exporter, err := otlpmetrichttp.New(
 		context.Background(),
-		otlpmetrichttp.WithEndpointURL(opts.OTLPEndpoint),
+		otlpmetrichttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/metrics")),
 	)
 	if err != nil {
 		return nil, nil, err
@@ -826,39 +778,58 @@ func newMeterProvider(opts Options, res *sdkresource.Resource) (*sdkmetric.Meter
 // --- helpers ---
 
 func deploymentEnv() string {
-	return os.Getenv("HELLNET_ENVIRONMENT")
+	return envKey("ENVIRONMENT")
 }
 
 // Loading carrega o .env por padrão (dev ou HELLNET_ENVIRONMENT não definido) e
-// valida as envs obrigatórias HELLNET_* (fail-fast). Em produção/staging
-// explícitos, apenas retorna — a configuração é esperada no ambiente.
+// valida as envs obrigatórias HELLNET_TELEMETRY_* (fail-fast via log.Fatalf).
+// Em produção/staging explícitos, apenas retorna — a configuração é esperada no
+// ambiente. Mantida por retrocompatibilidade: o mesmo comportamento já é feito
+// dentro de New() (sem Options). Prefira New().
 func Loading() {
+	if err := loadEnv(); err != nil {
+		log.Fatalf("%v", err)
+	}
+}
+
+// loadEnv carrega o .env (exceto em Production/Staging explícitos) e valida as
+// envs obrigatórias HELLNET_TELEMETRY_*, retornando erro em vez de matar o
+// processo. Usada por New() (sem Options) e por Loading().
+func loadEnv() error {
 	env := deploymentEnv()
 	// Produção/staging explícitos: não carrega .env local.
 	if env == "Production" || env == "Staging" {
-		return
+		return nil
 	}
 
-	envFile := os.Getenv("HELLNET_ENV_FILE")
+	envFile := firstEnv("HELLNET_TELEMETRY_ENV_FILE", "HELLNET_ENV_FILE")
 	if envFile == "" {
-		envFile = filepath.Join(getwd(), ".env")
+		envFile = filepath.Join(exeDir(), ".env")
 	}
 
 	// godotenv.Load doesn't override existing env vars by default
 	_ = godotenv.Load(envFile)
 
-	// Validação obrigatória (envs HELLNET_*) executada dentro do Loading.
-	if err := (Options{}).Validate(); err != nil {
-		log.Fatalf("%v", err)
-	}
+	// Validação obrigatória (envs HELLNET_TELEMETRY_* / HELLNET_*).
+	return (Options{}).Validate()
 }
 
-func getwd() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		return "."
+// exeDir retorna o diretório do executável (onde o binário compilado de main
+// reside), para que o .env seja lido do mesmo path do entrypoint — não do
+// diretório de onde o processo foi lançado (os.Getwd). Em `go run` o binário
+// temporário vai para $TMPDIR, então faz fallback para os.Getwd() quando o
+// .env não existir ao lado do executável, preservando o comportamento dev.
+func exeDir() string {
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		if _, err := os.Stat(filepath.Join(dir, ".env")); err == nil {
+			return dir
+		}
 	}
-	return dir
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
 }
 
 // buildVersion retorna a versão do módulo via build info (Go 1.18+).
@@ -874,7 +845,7 @@ func buildVersion() string {
 	return info.Main.Version
 }
 
-var ErrMissingServiceName = &configError{"HELLNET_SERVICE is required"}
+var ErrMissingServiceName = &configError{"HELLNET_TELEMETRY_SERVICE (ou HELLNET_SERVICE) is required"}
 
 type configError struct{ msg string }
 
@@ -906,7 +877,6 @@ type Meter interface {
 	Counter(name string) (metric.Int64Counter, error)
 	Gauge(name string) (metric.Int64Gauge, error)
 	Histogram(name string) (metric.Int64Histogram, error)
-	Timer(name string) (metric.Int64Histogram, error)
 }
 
 type meterAdapter struct{ metric.Meter }
@@ -919,9 +889,6 @@ func (a meterAdapter) Gauge(n string) (metric.Int64Gauge, error) {
 }
 func (a meterAdapter) Histogram(n string) (metric.Int64Histogram, error) {
 	return a.Meter.Int64Histogram(n)
-}
-func (a meterAdapter) Timer(n string) (metric.Int64Histogram, error) {
-	return a.Meter.Int64Histogram(n, metric.WithUnit("ms"), metric.WithDescription("duration in milliseconds"))
 }
 
 // Tracer abstrai a criação de spans (assinatura idêntica a trace.Tracer.Start).
