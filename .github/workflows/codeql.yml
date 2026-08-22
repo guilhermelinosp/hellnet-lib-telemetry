@@ -2,7 +2,7 @@ name: codeql
 
 on:
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 permissions:
   actions: read
@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'go' ]
+        language: ['go']
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -31,8 +31,12 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
-          build-mode: autobuild
+          build-mode: manual
           queries: +security-and-quality
+          # build-command explícito evita o fallback do autobuild para `make`,
+          # que rodaria o target `lint` (golangci-lint) — não instalado no
+          # runner do CodeQL → "Error 127". CodeQL analisa via go build direto.
+          build-command: go build ./...
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
