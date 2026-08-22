@@ -209,8 +209,17 @@ func otlpSignalURL(base, signalPath string) string {
 }
 
 // New creates a fully initialized Telemetry instance.
-// Sem argumentos, carrega telemetry.Default() (env HELLNET_*).
+// Sem argumentos, carrega o .env (via exeDir) + valida as envs HELLNET_*
+// obrigatórias (fail-fast) e usa telemetry.Default(). Com Options explícitas,
+// usa-as diretamente (sem exigir .env/env — útil em testes/embed).
 func New(opts ...Options) (*Telemetry, error) {
+	// Quando configurado via ambiente (sem Options), carrega .env + valida.
+	if len(opts) == 0 {
+		if err := loadEnv(); err != nil {
+			return nil, err
+		}
+	}
+
 	o := Default()
 	if len(opts) > 0 {
 		o = opts[0]
@@ -773,13 +782,24 @@ func deploymentEnv() string {
 }
 
 // Loading carrega o .env por padrão (dev ou HELLNET_ENVIRONMENT não definido) e
-// valida as envs obrigatórias HELLNET_* (fail-fast). Em produção/staging
-// explícitos, apenas retorna — a configuração é esperada no ambiente.
+// valida as envs obrigatórias HELLNET_TELEMETRY_* (fail-fast via log.Fatalf).
+// Em produção/staging explícitos, apenas retorna — a configuração é esperada no
+// ambiente. Mantida por retrocompatibilidade: o mesmo comportamento já é feito
+// dentro de New() (sem Options). Prefira New().
 func Loading() {
+	if err := loadEnv(); err != nil {
+		log.Fatalf("%v", err)
+	}
+}
+
+// loadEnv carrega o .env (exceto em Production/Staging explícitos) e valida as
+// envs obrigatórias HELLNET_TELEMETRY_*, retornando erro em vez de matar o
+// processo. Usada por New() (sem Options) e por Loading().
+func loadEnv() error {
 	env := deploymentEnv()
 	// Produção/staging explícitos: não carrega .env local.
 	if env == "Production" || env == "Staging" {
-		return
+		return nil
 	}
 
 	envFile := firstEnv("HELLNET_TELEMETRY_ENV_FILE", "HELLNET_ENV_FILE")
@@ -790,10 +810,8 @@ func Loading() {
 	// godotenv.Load doesn't override existing env vars by default
 	_ = godotenv.Load(envFile)
 
-	// Validação obrigatória (envs HELLNET_TELEMETRY_* / HELLNET_*) executada aqui.
-	if err := (Options{}).Validate(); err != nil {
-		log.Fatalf("%v", err)
-	}
+	// Validação obrigatória (envs HELLNET_TELEMETRY_* / HELLNET_*).
+	return (Options{}).Validate()
 }
 
 // exeDir retorna o diretório do executável (onde o binário compilado de main

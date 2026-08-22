@@ -9,9 +9,7 @@ import (
 )
 
 func main() {
-	telemetry.Loading()
-
-	ops, err := telemetry.New()
+	ops, err := telemetry.New() // New() carrega .env + valida HELLNET_TELEMETRY_*
 	if err != nil {
 		log.Fatalf("failed to init telemetry: %v", err)
 	}
