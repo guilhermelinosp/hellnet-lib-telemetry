@@ -274,9 +274,10 @@ func (t *Telemetry) healthChecksSnapshot() map[string]func(ctx context.Context) 
 const healthDialTimeout = 2 * time.Second
 
 // checkOTLPReachable verifies the OTLP collector is reachable via TCP.
-// Port resolution: (1) explicit port in the endpoint, or (2) HELLNET_PORT (required, no default).
+// The port comes from the endpoint itself (or scheme default); the library
+// does not read a separate port env var.
 func checkOTLPReachable(ctx context.Context, endpoint string) error {
-	host, port, err := parseOTLPEndpoint(endpoint, os.Getenv("HELLNET_PORT"))
+	host, port, err := parseOTLPEndpoint(endpoint, "")
 	if err != nil {
 		return err
 	}
@@ -291,15 +292,20 @@ func checkOTLPReachable(ctx context.Context, endpoint string) error {
 	return nil
 }
 
-// parseOTLPEndpoint extracts host/port from the OTLP endpoint.
-// defaultPort is used when the endpoint carries no explicit port; it is injected
-// by the caller (checkOTLPReachable) so this function stays pure and testable,
-// without reading os.Getenv directly.
-func parseOTLPEndpoint(endpoint, defaultPort string) (host, port string, err error) {
+// parseOTLPEndpoint extracts host/port from the OTLP endpoint. The port comes
+// from the endpoint itself; if absent, the scheme default is inferred (443 for
+// https, 80 for http) so the health check can dial. There is no separate port
+// env var — the library never reads HELLNET_*_PORT. Pure and testable.
+func parseOTLPEndpoint(endpoint, _ string) (host, port string, err error) {
 	if u, perr := url.Parse(endpoint); perr == nil && u.Host != "" {
 		port = u.Port()
 		if port == "" {
-			port = defaultPort
+			switch u.Scheme {
+			case "https":
+				port = "443"
+			case "http":
+				port = "80"
+			}
 		}
 		return u.Hostname(), port, nil
 	}
@@ -307,7 +313,7 @@ func parseOTLPEndpoint(endpoint, defaultPort string) (host, port string, err err
 	if h, p, perr := net.SplitHostPort(endpoint); perr == nil {
 		return h, p, nil
 	}
-	return endpoint, defaultPort, nil
+	return endpoint, "", nil
 }
 
 func writeHealth(w http.ResponseWriter, code int, status HealthStatus) {

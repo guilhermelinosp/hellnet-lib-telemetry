@@ -340,13 +340,35 @@ func TestCheckOTLPReachable_Parsing(t *testing.T) {
 	}
 }
 
-// TestCheckOTLPReachable_NoPortFallback garante que, sem HELLNET_PORT e sem
-// porta no endpoint, NÃO há default por scheme (443/4318): deve falhar.
-func TestCheckOTLPReachable_NoPortFallback(t *testing.T) {
-	t.Setenv("HELLNET_PORT", "")
-	err := checkOTLPReachable(context.Background(), "https://127.0.0.1")
-	if err == nil {
-		t.Fatal("esperado erro sem HELLNET_PORT e sem porta no endpoint (sem default 443)")
+// TestCheckOTLPReachable_PortInferred garante que a porta vem do ENDPOINT ou,
+// na sua ausência, é inferida do scheme (443 p/ https, 80 p/ http). A lib não
+// lê nenhuma variável de porta separada.
+func TestCheckOTLPReachable_PortInferred(t *testing.T) {
+	// endpoint com porta explícita → usa a porta do próprio endpoint.
+	h, p, err := parseOTLPEndpoint("https://collector.example.com:4318", "")
+	if err != nil {
+		t.Fatalf("parseOTLPEndpoint: %v", err)
+	}
+	if h != "collector.example.com" || p != "4318" {
+		t.Errorf("host=%q port=%q, want collector.example.com/4318", h, p)
+	}
+
+	// https sem porta → infere 443.
+	h, p, err = parseOTLPEndpoint("https://collector.example.com", "")
+	if err != nil {
+		t.Fatalf("parseOTLPEndpoint: %v", err)
+	}
+	if h != "collector.example.com" || p != "443" {
+		t.Errorf("host=%q port=%q, want collector.example.com/443", h, p)
+	}
+
+	// http sem porta → infere 80.
+	h, p, err = parseOTLPEndpoint("http://collector.example.com", "")
+	if err != nil {
+		t.Fatalf("parseOTLPEndpoint: %v", err)
+	}
+	if h != "collector.example.com" || p != "80" {
+		t.Errorf("host=%q port=%q, want collector.example.com/80", h, p)
 	}
 }
 
@@ -474,27 +496,24 @@ func TestHealthRegister(t *testing.T) {
 // forma host:port, host nu, e endpoint vazio.
 func TestParseOTLPEndpoint(t *testing.T) {
 	tests := []struct {
-		name        string
-		endpoint    string
-		defaultPort string
-		wantHost    string
-		wantPort    string
+		name     string
+		endpoint string
+		wantHost string
+		wantPort string
 	}{
-		{"url com porta explícita", "http://localhost:4318", "", "localhost", "4318"},
-		{"https com porta explícita (ignora default)", "https://collector:4317", "4318", "collector", "4317"},
-		{"url sem porta usa default", "http://localhost", "4318", "localhost", "4318"},
-		{"https sem porta usa default", "https://collector", "4317", "collector", "4317"},
-		{"url com path e porta", "http://localhost:4318/v1", "", "localhost", "4318"},
-		{"forma host:port", "localhost:4318", "", "localhost", "4318"},
-		{"forma host:port ignora default", "localhost:4318", "9999", "localhost", "4318"},
-		{"host nu usa default", "localhost", "4318", "localhost", "4318"},
-		{"host nu sem default", "localhost", "", "localhost", ""},
-		{"endpoint vazio sem default", "", "", "", ""},
+		{"url com porta explícita", "http://localhost:4318", "localhost", "4318"},
+		{"https com porta explícita", "https://collector:4317", "collector", "4317"},
+		{"http sem porta infere 80", "http://localhost", "localhost", "80"},
+		{"https sem porta infere 443", "https://collector", "collector", "443"},
+		{"url com path e porta", "http://localhost:4318/v1", "localhost", "4318"},
+		{"forma host:port", "localhost:4318", "localhost", "4318"},
+		{"host nu sem porta infere 80 (http implícito? sem scheme)", "localhost", "localhost", ""},
+		{"endpoint vazio", "", "", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			host, port, err := parseOTLPEndpoint(tt.endpoint, tt.defaultPort)
+			host, port, err := parseOTLPEndpoint(tt.endpoint, "")
 			if err != nil {
 				t.Fatalf("erro inesperado: %v", err)
 			}
@@ -1283,19 +1302,23 @@ func TestOTLPEndpointParsing(t *testing.T) {
 		wantPort string
 	}{
 		{"http with port", "http://collector:4318", "collector", "4318"},
-		{"https default port", "https://collector.example.com", "collector.example.com", "443"},
-		{"http default port", "http://collector.example.com", "collector.example.com", "4318"},
+		{"https infers 443", "https://collector.example.com", "collector.example.com", "443"},
+		{"http infers 80", "http://collector.example.com", "collector.example.com", "80"},
 		{"host:port only", "collector:4318", "collector", "4318"},
-		{"host only", "collector", "collector", "4318"},
+		{"https with explicit port", "https://collector.example.com:4317", "collector.example.com", "4317"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// This tests the internal parsing logic via health check
-			// We can't directly test checkOTLPReachable without network,
-			// but we verify the URL parsing logic is sound
-			if tt.endpoint != "" {
-				t.Logf("endpoint: %s -> host: %s, port: %s", tt.endpoint, tt.wantHost, tt.wantPort)
+			h, p, err := parseOTLPEndpoint(tt.endpoint, "")
+			if err != nil {
+				t.Fatalf("parseOTLPEndpoint: %v", err)
+			}
+			if h != tt.wantHost {
+				t.Errorf("host = %q, want %q", h, tt.wantHost)
+			}
+			if p != tt.wantPort {
+				t.Errorf("port = %q, want %q", p, tt.wantPort)
 			}
 		})
 	}
@@ -1358,11 +1381,9 @@ func setMandatoryEnv(t *testing.T) {
 	t.Helper()
 	os.Setenv("HELLNET_SERVICE", "test-service")
 	os.Setenv("HELLNET_ENDPOINT", "http://localhost:4318")
-	os.Setenv("HELLNET_PORT", "4318")
 	t.Cleanup(func() {
 		os.Unsetenv("HELLNET_SERVICE")
 		os.Unsetenv("HELLNET_ENDPOINT")
-		os.Unsetenv("HELLNET_PORT")
 	})
 }
 
@@ -1537,7 +1558,6 @@ func TestLoadEnvFile_EmptyEnvironment(t *testing.T) {
 	content := "TEST_VAR=should-load\n" +
 		"HELLNET_SERVICE=test-service\n" +
 		"HELLNET_ENDPOINT=http://localhost:4318\n" +
-		"HELLNET_PORT=4318\n" +
 		"HELLNET_ENVIRONMENT=Development\n"
 	err := os.WriteFile(envFile, []byte(content), 0o644)
 	if err != nil {
@@ -1551,7 +1571,6 @@ func TestLoadEnvFile_EmptyEnvironment(t *testing.T) {
 		os.Unsetenv("TEST_VAR")
 		os.Unsetenv("HELLNET_SERVICE")
 		os.Unsetenv("HELLNET_ENDPOINT")
-		os.Unsetenv("HELLNET_PORT")
 		os.Unsetenv("HELLNET_ENVIRONMENT")
 	}()
 
@@ -1560,6 +1579,33 @@ func TestLoadEnvFile_EmptyEnvironment(t *testing.T) {
 
 	if os.Getenv("TEST_VAR") != "should-load" {
 		t.Errorf("TEST_VAR = %q, want %q", os.Getenv("TEST_VAR"), "should-load")
+	}
+}
+
+// TestExeDir verifica que a resolução do diretório do .env prefere o path do
+// executável (onde main reside) e cai para os.Getwd() quando não há .env lá.
+// No go test o binário fica em $TMPDIR sem .env, então espera-se fallback ao cwd.
+func TestExeDir(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	got := exeDir()
+	// Sem .env ao lado do executável de teste → deve cair no cwd.
+	if got != dir {
+		t.Errorf("exeDir() = %q, want cwd %q (fallback)", got, dir)
+	}
+
+	// Com .env ao lado do executável, deve retornar o dir do executável.
+	if exe, eerr := os.Executable(); eerr == nil {
+		exePath := filepath.Dir(exe)
+		tmpEnv := filepath.Join(exePath, ".env")
+		if werr := os.WriteFile(tmpEnv, []byte("X=1\n"), 0o644); werr == nil {
+			defer os.Remove(tmpEnv)
+			if got := exeDir(); got != exePath {
+				t.Errorf("exeDir() = %q, want exe dir %q (.env presente)", got, exePath)
+			}
+		}
 	}
 }
 
@@ -1691,13 +1737,13 @@ func (mockDriver) Open(name string) (driver.Conn, error) { return &mockConn{}, n
 type mockConn struct{}
 
 func (mockConn) Prepare(query string) (driver.Stmt, error) { return nil, nil }
-func (mockConn) Close() error                             { return nil }
-func (mockConn) Begin() (driver.Tx, error)                { return nil, nil }
+func (mockConn) Close() error                              { return nil }
+func (mockConn) Begin() (driver.Tx, error)                 { return nil, nil }
 
 type mockConnector struct{ d mockDriver }
 
 func (mockConnector) Connect(context.Context) (driver.Conn, error) { return &mockConn{}, nil }
-func (mockConnector) Driver() driver.Driver                       { return mockDriver{} }
+func (mockConnector) Driver() driver.Driver                        { return mockDriver{} }
 
 func TestWatchDB(t *testing.T) {
 	tel, reader := newTestTelemetry()

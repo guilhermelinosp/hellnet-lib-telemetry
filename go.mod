@@ -1,6 +1,6 @@
 module github.com/guilhermelinosp/hellnet-lib-telemetry
 
-go 1.27
+go 1.26
 
 require (
 	github.com/joho/godotenv v1.5.1
