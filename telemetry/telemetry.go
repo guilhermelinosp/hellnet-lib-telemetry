@@ -35,7 +35,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/joho/godotenv"
+	environments "github.com/guilhermelinosp/hellnet-lib-environments"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
@@ -124,37 +124,13 @@ type Options struct {
 	PrometheusExporter bool
 }
 
-// envPrefixes define a ordem de preferência dos prefixos de env var lidas pela
-// lib. O padrão hellnet é HELLNET_TELEMETRY_*; HELLNET_* é mantido por
-// retrocompatibilidade (fallback). firstEnv retorna o primeiro não-vazio.
-const (
-	envPrefixNew = "HELLNET_TELEMETRY_"
-	envPrefixOld = "HELLNET_"
-)
-
-// firstEnv retorna o valor da primeira env var não-vazia em names; "" se nenhuma.
-func firstEnv(names ...string) string {
-	for _, n := range names {
-		if v := os.Getenv(n); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// envKey resolve o nome canônico de uma env dada a sua suffix (ex.: "SERVICE")
-// tentando o prefixo novo e depois o antigo.
-func envKey(suffix string) string {
-	return firstEnv(envPrefixNew+suffix, envPrefixOld+suffix)
-}
-
-// Default returns options populated from HELLNET_TELEMETRY_* env vars
+// LoadFromEnv returns options populated from HELLNET_TELEMETRY_* env vars
 // (fallback para HELLNET_* por retrocompatibilidade).
 // Lê SERVICE, ENDPOINT e compõe o endereço OTLP com
 // PORT (quando presente): ENDPOINT[:PORT].
-func Default() Options {
+func LoadFromEnv() Options {
 	return Options{
-		ServiceName:        envKey("SERVICE"),
+		ServiceName:        environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "SERVICE", ""),
 		OTLPEndpoint:       otlpEndpointFromEnv(),
 		LogLevel:           slog.LevelInfo,
 		Enabled:            true,
@@ -172,8 +148,8 @@ func (o Options) Validate() error {
 	required := []string{"SERVICE", "ENDPOINT"}
 	var missing []string
 	for _, suffix := range required {
-		if envKey(suffix) == "" {
-			missing = append(missing, envPrefixNew+suffix)
+		if environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", suffix, "") == "" {
+			missing = append(missing, "HELLNET_TELEMETRY_"+suffix)
 		}
 	}
 	if len(missing) > 0 {
@@ -186,7 +162,7 @@ func (o Options) Validate() error {
 // deve vir junto do próprio ENDPOINT (ex.: https://collector:443); não há
 // variável de porta separada — a lib não aceita HELLNET_*_PORT.
 func otlpEndpointFromEnv() string {
-	return envKey("ENDPOINT")
+	return environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "ENDPOINT", "")
 }
 
 // otlpSignalURL retorna a URL completa de um sinal OTLP (traces/metrics/logs)
@@ -208,22 +184,26 @@ func otlpSignalURL(base, signalPath string) string {
 	return u.String()
 }
 
-// New creates a fully initialized Telemetry instance.
-// Sem argumentos, carrega o .env (via exeDir) + valida as envs HELLNET_*
-// obrigatórias (fail-fast) e usa telemetry.Default(). Com Options explícitas,
-// usa-as diretamente (sem exigir .env/env — útil em testes/embed).
-func New(opts ...Options) (*Telemetry, error) {
-	// Quando configurado via ambiente (sem Options), carrega .env + valida.
-	if len(opts) == 0 {
-		if err := loadEnv(); err != nil {
-			return nil, err
-		}
-	}
+// loadEnvFiles carrega o .env de desenvolvimento (dev) antes de ler as envs,
+// espelhando o padrão de hellnet-lib-cache. Erros de leitura são ignorados
+// (o .env é opcional em runtime).
+func loadEnvFiles() {
+	_ = environments.LoadDotEnv("HELLNET_TELEMETRY_ENV_FILE", "HELLNET_ENV_FILE")
+}
 
-	o := Default()
+// New creates a fully initialized Telemetry instance.
+// Sem argumentos, carrega o .env (dev) + lê as envs HELLNET_*
+// obrigatórias (env-first) e usa telemetry.LoadFromEnv(). Com Options explícitas,
+// usa-as diretamente (sobrescrevendo o env — útil em testes/embed).
+func New(opts ...Options) (*Telemetry, error) {
+	// Env-first: sempre carrega .env (dev) + lê envs; opts sobrescrevem.
+	loadEnvFiles()
+
+	o := LoadFromEnv()
 	if len(opts) > 0 {
 		o = opts[0]
 	}
+
 	if o.ServiceName == "" {
 		return nil, ErrMissingServiceName
 	}
@@ -268,6 +248,15 @@ func New(opts ...Options) (*Telemetry, error) {
 	}
 
 	return tel, nil
+}
+
+// MustNew is like New but panics on error. Use at startup.
+func MustNew(opts ...Options) *Telemetry {
+	t, err := New(opts...)
+	if err != nil {
+		panic(err)
+	}
+	return t
 }
 
 // buildLogger monta o Logger (stdout JSON + OTLP → Loki) com redação e
@@ -477,7 +466,8 @@ func (t *Telemetry) startRuntimeMetrics() {
 	threads, _ := m.Int64ObservableGauge("process_threads", metric.WithDescription("Number of OS threads"))
 
 	// Histograma de pausa de GC individual (não observável: Record por ciclo).
-	gcPauseHist, _ := m.Float64Histogram("process_gc_pause_seconds",
+	gcPauseHist, _ := m.Float64Histogram(
+		"process_gc_pause_seconds",
 		metric.WithExplicitBucketBoundaries(gcPauseBoundaries...),
 		metric.WithDescription("Distribution of individual GC pause durations"),
 	)
@@ -778,7 +768,7 @@ func newMeterProvider(opts Options, res *sdkresource.Resource) (*sdkmetric.Meter
 // --- helpers ---
 
 func deploymentEnv() string {
-	return envKey("ENVIRONMENT")
+	return environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "ENVIRONMENT", "")
 }
 
 // Loading carrega o .env por padrão (dev ou HELLNET_ENVIRONMENT não definido) e
@@ -802,13 +792,9 @@ func loadEnv() error {
 		return nil
 	}
 
-	envFile := firstEnv("HELLNET_TELEMETRY_ENV_FILE", "HELLNET_ENV_FILE")
-	if envFile == "" {
-		envFile = filepath.Join(exeDir(), ".env")
+	if err := environments.LoadDotEnv("HELLNET_TELEMETRY_ENV_FILE", "HELLNET_ENV_FILE"); err != nil {
+		return err
 	}
-
-	// godotenv.Load doesn't override existing env vars by default
-	_ = godotenv.Load(envFile)
 
 	// Validação obrigatória (envs HELLNET_TELEMETRY_* / HELLNET_*).
 	return (Options{}).Validate()
@@ -884,9 +870,11 @@ type meterAdapter struct{ metric.Meter }
 func (a meterAdapter) Counter(n string) (metric.Int64Counter, error) {
 	return a.Meter.Int64Counter(n)
 }
+
 func (a meterAdapter) Gauge(n string) (metric.Int64Gauge, error) {
 	return a.Meter.Int64Gauge(n)
 }
+
 func (a meterAdapter) Histogram(n string) (metric.Int64Histogram, error) {
 	return a.Meter.Int64Histogram(n)
 }
@@ -940,6 +928,7 @@ func (s slogLogger) Error(msg string, a ...any) { s.base().Error(msg, a...) }
 func (s slogLogger) ErrorContext(ctx context.Context, msg string, a ...any) {
 	s.base().ErrorContext(ctx, msg, a...)
 }
+
 func (s slogLogger) With(a ...any) Logger {
 	return slogLogger{s.base().With(a...)}
 }

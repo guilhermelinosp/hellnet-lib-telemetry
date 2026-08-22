@@ -1036,7 +1036,7 @@ func TestDefaultOptions(t *testing.T) {
 	defer os.Unsetenv("HELLNET_SERVICE")
 	defer os.Unsetenv("HELLNET_ENDPOINT")
 
-	opts := Default()
+	opts := LoadFromEnv()
 
 	if opts.ServiceName != "test-service" {
 		t.Errorf("ServiceName = %q, want %q", opts.ServiceName, "test-service")
@@ -1056,7 +1056,7 @@ func TestDefaultOptions_EmptyEnv(t *testing.T) {
 	os.Unsetenv("HELLNET_SERVICE")
 	os.Unsetenv("HELLNET_ENDPOINT")
 
-	opts := Default()
+	opts := LoadFromEnv()
 
 	if opts.ServiceName != "" {
 		t.Errorf("ServiceName = %q, want empty", opts.ServiceName)
