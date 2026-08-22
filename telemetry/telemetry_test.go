@@ -1737,13 +1737,13 @@ func (mockDriver) Open(name string) (driver.Conn, error) { return &mockConn{}, n
 type mockConn struct{}
 
 func (mockConn) Prepare(query string) (driver.Stmt, error) { return nil, nil }
-func (mockConn) Close() error                             { return nil }
-func (mockConn) Begin() (driver.Tx, error)                { return nil, nil }
+func (mockConn) Close() error                              { return nil }
+func (mockConn) Begin() (driver.Tx, error)                 { return nil, nil }
 
 type mockConnector struct{ d mockDriver }
 
 func (mockConnector) Connect(context.Context) (driver.Conn, error) { return &mockConn{}, nil }
-func (mockConnector) Driver() driver.Driver                       { return mockDriver{} }
+func (mockConnector) Driver() driver.Driver                        { return mockDriver{} }
 
 func TestWatchDB(t *testing.T) {
 	tel, reader := newTestTelemetry()

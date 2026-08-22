@@ -712,7 +712,6 @@ func newLoggerProvider(opts Options, res *sdkresource.Resource) (*sdklog.LoggerP
 			exporter,
 			sdklog.WithExportInterval(1*time.Second),
 			sdklog.WithExportMaxBatchSize(10),
-			sdklog.WithExportBufferSize(100),
 		)),
 	)
 	return lp, nil
