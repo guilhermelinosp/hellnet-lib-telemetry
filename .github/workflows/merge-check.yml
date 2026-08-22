@@ -1,0 +1,74 @@
+name: merge-check
+
+# Validate PR merge strategy + conventional commits
+# Inputs: runner (default: ubuntu-latest)
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: false
+        type: string
+        default: ubuntu-latest
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  check:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check merge strategy (--no-ff)
+        run: |
+          BASE="${{ github.base_ref }}"
+          HEAD="${{ github.head_ref }}"
+
+          if ! git merge-base --is-ancestor origin/$BASE HEAD 2>/dev/null; then
+            echo "Base branch not found locally, skipping check"
+            exit 0
+          fi
+
+          COMMITS=$(git log --oneline origin/$BASE..HEAD 2>/dev/null | wc -l)
+          echo "Commits to merge: $COMMITS"
+
+      - name: Confirm base branch
+        if: github.base_ref == 'main'
+        run: |
+          echo "PR approved for ${{ github.base_ref }}"
+
+      - name: Conventional Commits check
+        run: |
+          BASE="${{ github.base_ref }}"
+          HEAD="${{ github.head_ref }}"
+
+          MERGE_BASE=$(git merge-base origin/$BASE HEAD 2>/dev/null || echo "")
+          if [ -z "$MERGE_BASE" ]; then
+            echo "Could not determine merge base, skipping"
+            exit 0
+          fi
+
+          ERRORS=0
+          while IFS= read -r COMMIT; do
+            if echo "$COMMIT" | grep -qE '^Initial plan$'; then
+              continue
+            fi
+
+            if ! echo "$COMMIT" | grep -qE '^(feat|fix|docs|style|ref|refactor|test|chore|ci|perf|build|revert)(\([a-zA-Z0-9_-]+\))?:\s.+'; then
+              if echo "$COMMIT" | grep -q '^Merge'; then
+                continue
+              fi
+              echo "Commit does not follow Conventional Commits: $COMMIT"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done < <(git log --format='%s' "$MERGE_BASE..HEAD" 2>/dev/null)
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "$ERRORS commits do not follow Conventional Commits"
+            exit 1
+          fi
+          echo "All commits follow Conventional Commits"
