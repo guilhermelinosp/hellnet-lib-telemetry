@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/guilhermelinosp/hellnet-lib-telemetry/telemetry"
 )
@@ -23,6 +24,7 @@ func main() {
 
 	ops.Logger.Info("starting server", "port", 8080)
 	if err := http.ListenAndServe(":8080", telemetry.Middleware(ops, mux)); err != nil {
-		log.Fatalf("server failed: %v", err)
+		ops.Logger.Error("server failed", "error", err)
+		os.Exit(1)
 	}
 }
