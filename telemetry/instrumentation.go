@@ -182,7 +182,7 @@ func (t *Telemetry) recordHealthCheck(ctx context.Context, name string, fn func(
 
 // registerHealthMetrics cria o Int64ObservableGauge healthcheck_status, que
 // expõe o status (1=pass, 0=fail) de cada check a partir do mapa healthStatus
-// no momento do scrape/export. Isso garante que a métrica apareça em OTLP e
+// no instante do scrape/export. Isso garante que a métrica apareça em OTLP e
 // /metrics — o exporter Prometheus (otelprom) não exporta Int64Gauge síncrono
 // com atributo de forma consistente, ao contrário dos observables (ex.: process_*).
 func (t *Telemetry) registerHealthMetrics() {
@@ -331,7 +331,7 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 		opts = append(opts, otelhttp.WithTracerProvider(tel.tp))
 	}
 
-	// Instrumentos de request criados uma única vez.
+	// Instrumentações de request criados uma única vez.
 	reqCount, _ := tel.Meter.Counter("http_requests_total")
 	reqDuration, _ := tel.Meter.Float64Histogram("http_request_duration_seconds",
 		metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...),
@@ -530,7 +530,7 @@ func (t *Telemetry) Worker(ctx context.Context, job string, fn func(ctx context.
 
 // ───────────── Process metrics helpers (runtime-guarded) ─────────────
 // readOpenFds e readThreads leem /proc (Linux). Em outras plataformas retornam
-// erro e a métrica correspondente simplesmente não é emitida — sem build tags
+// erro e a métrica relacionada simplesmente não é emitida — sem build tags
 // separados, mantendo o número de arquivos baixo.
 
 func readOpenFds() (int64, error) {
