@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -9,7 +10,11 @@ import (
 )
 
 func main() {
-	ops, err := telemetry.New() // New() carrega .env + valida HELLNET_TELEMETRY_*
+	// Contexto da aplicação passado UMA vez na construção: tudo que a lib
+	// executar (spans, workers, health checks, logs) herda dele.
+	ctx := context.Background()
+
+	ops, err := telemetry.New(ctx) // New() carrega .env + valida HELLNET_TELEMETRY_*
 	if err != nil {
 		log.Fatalf("failed to init telemetry: %v", err)
 	}

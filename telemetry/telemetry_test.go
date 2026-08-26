@@ -34,7 +34,7 @@ func TestTelemetrySatisfiesClient(t *testing.T) {
 
 func newTestTel(t *testing.T) *Telemetry {
 	t.Helper()
-	tel, err := New(Options{
+	tel, err := New(context.Background(), Options{
 		ServiceName: "abstraction-test",
 		Enabled:     true, // tudo ligado (logging incluso)
 	})
@@ -110,17 +110,16 @@ func TestMeterTrace(t *testing.T) {
 
 func TestMeterLog(t *testing.T) {
 	tel := newTestTel(t)
-	ctx := context.Background()
 
 	// logging desligado → Logger nil → usa slog.Default(); não deve panicar
-	tel.Log().InfoContext(ctx, "info-ctx", "k", "v")
+	tel.Log().Info("info-ctx", "k", "v")
 	tel.Log().Error("error-plain", "err", "boom")
 	tel.Log().Warn("warn-plain")
-	tel.Log().DebugContext(ctx, "debug-ctx")
+	tel.Log().Debug("debug-ctx")
 }
 
 func TestMeterNoopWhenMetricsDisabled(t *testing.T) {
-	tel, err := New(Options{ServiceName: "noop-metrics", Enabled: false})
+	tel, err := New(context.Background(), Options{ServiceName: "noop-metrics", Enabled: false})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -530,12 +529,12 @@ func TestParseOTLPEndpoint(t *testing.T) {
 func TestWithSpan(t *testing.T) {
 	tel := &Telemetry{}
 	wantErr := errors.New("boom")
-	if got := tel.WithSpan(context.Background(), "op", func(ctx context.Context) error {
+	if got := tel.WithSpan("op", func(ctx context.Context) error {
 		return wantErr
 	}); got != wantErr {
 		t.Errorf("got %v, want %v", got, wantErr)
 	}
-	if err := tel.WithSpan(context.Background(), "op2", func(ctx context.Context) error {
+	if err := tel.WithSpan("op2", func(ctx context.Context) error {
 		return nil
 	}); err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -570,7 +569,7 @@ func TestMiddleware_StatusCodeCapture(t *testing.T) {
 		LogLevel:     slog.LevelInfo,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -607,7 +606,7 @@ func TestMiddleware_LoggingOutput(t *testing.T) {
 		LogLevel:     slog.LevelInfo,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -663,7 +662,7 @@ func TestMiddleware_ErrorStatus(t *testing.T) {
 		LogLevel:     slog.LevelInfo,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -698,7 +697,7 @@ func TestMiddleware_DifferentMethods(t *testing.T) {
 		LogLevel:     slog.LevelInfo,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -736,7 +735,7 @@ func TestMiddleware_QueryParamsInPath(t *testing.T) {
 		LogLevel:     slog.LevelInfo,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -769,7 +768,7 @@ func TestMiddleware_Panics(t *testing.T) {
 		LogLevel:     slog.LevelInfo,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -822,7 +821,7 @@ func TestMiddleware_WithTracing(t *testing.T) {
 		LogLevel:     slog.LevelInfo,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -861,7 +860,7 @@ func TestMiddleware_DurationLogged(t *testing.T) {
 		LogLevel:     slog.LevelInfo,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1075,7 +1074,7 @@ func TestNew_MissingServiceName(t *testing.T) {
 		OTLPEndpoint: "http://localhost:4318",
 	}
 
-	_, err := New(opts)
+	_, err := New(context.Background(), opts)
 	if err == nil {
 		t.Fatal("expected error for missing service name")
 	}
@@ -1091,7 +1090,7 @@ func TestNew_WithMinimalOptions(t *testing.T) {
 		Enabled:      true,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1112,7 +1111,7 @@ func TestNew_DisabledTracing(t *testing.T) {
 		Enabled:      false,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1130,7 +1129,7 @@ func TestNew_DisabledMetrics(t *testing.T) {
 		Enabled:      true,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1156,7 +1155,7 @@ func TestNew_CustomResourceAttrs(t *testing.T) {
 		},
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1178,7 +1177,7 @@ func TestShutdown(t *testing.T) {
 		Enabled:      true,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1198,7 +1197,7 @@ func TestShutdownWithTimeout(t *testing.T) {
 		Enabled:      true,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1217,7 +1216,7 @@ func TestTracerFunctionality(t *testing.T) {
 		Enabled:      true,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1241,7 +1240,7 @@ func TestMeterFunctionality(t *testing.T) {
 		Enabled:      false,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1277,7 +1276,7 @@ func TestLoggerFunctionality(t *testing.T) {
 		LogLevel:     slog.LevelDebug,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1349,7 +1348,7 @@ func TestNew_ProvidersAreInitialized(t *testing.T) {
 		Enabled:      true,
 	}
 
-	tel, err := New(opts)
+	tel, err := New(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1668,7 +1667,7 @@ func TestWithSpanRecoversPanic(t *testing.T) {
 
 	func() {
 		defer func() { recover() }() // engole o re-panic para o teste
-		_ = tel.WithSpan(context.Background(), "op", func(ctx context.Context) error {
+		_ = tel.WithSpan("op", func(ctx context.Context) error {
 			panic("kaboom")
 		})
 	}()
@@ -1826,7 +1825,7 @@ func TestWorker_SuccessRecordsMetrics(t *testing.T) {
 	tel, reader := newTestTelemetry()
 
 	called := false
-	err := tel.Worker(context.Background(), "import", func(ctx context.Context) error {
+	err := tel.Worker("import", func(ctx context.Context) error {
 		called = true
 		time.Sleep(time.Millisecond)
 		return nil
@@ -1851,7 +1850,7 @@ func TestWorker_ErrorStatusAndPropagation(t *testing.T) {
 	tel, reader := newTestTelemetry()
 
 	want := errors.New("boom")
-	err := tel.Worker(context.Background(), "export", func(ctx context.Context) error {
+	err := tel.Worker("export", func(ctx context.Context) error {
 		return want
 	})
 	if !errors.Is(err, want) {
@@ -1872,7 +1871,7 @@ func TestWorker_LogOutput(t *testing.T) {
 		Logger:      slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}
 
-	if err := tel.Worker(context.Background(), "sync", func(ctx context.Context) error { return nil }); err != nil {
+	if err := tel.Worker("sync", func(ctx context.Context) error { return nil }); err != nil {
 		t.Fatalf("Worker: %v", err)
 	}
 

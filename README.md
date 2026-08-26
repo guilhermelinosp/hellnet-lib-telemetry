@@ -16,14 +16,18 @@ also available locally for inspection (no collector required).
 package main
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/guilhermelinosp/hellnet-lib-telemetry/telemetry"
 )
 
 func main() {
-	opts := telemetry.Default() // lê env HELLNET_*
-	tel, err := telemetry.New(opts)
+	// Contexto da aplicação passado UMA vez na construção — tudo que a lib
+	// executar (spans, workers, health checks, logs) herda dele.
+	ctx := context.Background()
+
+	tel, err := telemetry.New(ctx) // lê env HELLNET_TELEMETRY_* / HELLNET_*
 	if err != nil {
 		panic(err)
 	}
@@ -62,8 +66,10 @@ A lib aceita o prefixo **`HELLNET_TELEMETRY_*`** (padrão hellnet) ou o antigo
 ### Default (from env)
 
 ```go
-opts := telemetry.Default()
-tel, _ := telemetry.New(opts)
+ctx := context.Background()
+
+// env-first (sem Options): carrega .env + HELLNET_TELEMETRY_* / HELLNET_*
+tel, _ := telemetry.New(ctx)
 ```
 
 ### Custom options
@@ -79,8 +85,20 @@ opts := telemetry.Options{
 	},
 	PrometheusExporter: true, // expõe /metrics (default true)
 }
-tel, _ := telemetry.New(opts)
+tel, _ := telemetry.New(ctx, opts)
 ```
+
+### Application context (passado UMA vez)
+
+O contexto da aplicação entra **somente no `New`/`MustNew`** e fica retido
+internamente (`baseCtx`). Nenhum método da lib recebe ctx de app. É o único
+lugar para anexar baggage/propagators OTel de longa duração.
+
+Consequência de correlação: traces de aplicação formam **uma única linhagem**
+com raiz no `baseCtx` (`WithSpan`/`Worker` criam filhos sob ele; o ctx derivado
+é repassado ao callback para continuação por código otel-instrumentado).
+Traces request-scoped extraídos pelo **Middleware** permanecem independentes —
+origem são os requests inbound (comportamento server-side correto).
 
 ### Tudo ligado ou tudo desligado
 
@@ -146,24 +164,11 @@ Métricas produzidas: `healthcheck_status{check,status}`,
 
 ## Tracing
 
-```go
-ctx, span := tel.Tracer.Start(ctx, "operation-name",
-	trace.WithAttributes(attribute.String("order.id", "123")))
-defer span.End()
-
-span.AddEvent("validation-started")
-span.SetAttributes(attribute.Int("items.count", 5))
-
-// Child span
-ctx, childSpan := tel.Tracer.Start(ctx, "db-query")
-childSpan.SetAttributes(attribute.String("db.statement", "SELECT ..."))
-childSpan.End()
-```
-
-### Trace helper (`WithSpan`)
+Fluxo padrão (ctx-free — span derivado do contexto-base, repassado ao callback):
 
 ```go
-err := tel.WithSpan(ctx, "process-order", func(ctx context.Context) error {
+err := tel.WithSpan("process-order", func(ctx context.Context) error {
+	// ctx contém o span; código otel-instrumentado continua a linhagem
 	return process(ctx, order)
 })
 // em erro: span marcado com status=Error + RecordError
@@ -172,6 +177,20 @@ err := tel.WithSpan(ctx, "process-order", func(ctx context.Context) error {
 > `WithSpan` **recupera panics**: marca o span como erro, incrementa
 > `exceptions_total{span,kind=panic}` e **re-propaga o panic** (comportamento
 > original preservado).
+
+### Escape hatch avançado (`Trace().Start`)
+
+Precisa enraizar um span num ctx próprio? Use a superfície explícita com ctx
+(documentada como interna/avançada; fora do fluxo padrão de correlação):
+
+```go
+ctx, span := tel.Trace().Start(parentCtx, "operation-name",
+	trace.WithAttributes(attribute.String("order.id", "123")))
+defer span.End()
+
+span.AddEvent("validation-started")
+span.SetAttributes(attribute.Int("items.count", 5))
+```
 
 ---
 
@@ -362,16 +381,21 @@ No OpenTelemetry percentis **não são emitidos** — o que sai é um histograma
 Usa `log/slog` com saída dupla: **stdout (JSON)** + **OTLP → Loki**.
 
 ```go
-tel.Logger.InfoContext(ctx, "order created",
+tel.Log().Info("order created",
 	"order_id", "123", "customer_id", "456", "amount", 99.90)
 
-tel.Logger.WarnContext(ctx, "rate limit approaching", "current", 95, "limit", 100)
+tel.Log().Warn("rate limit approaching", "current", 95, "limit", 100)
 
-tel.Logger.ErrorContext(ctx, "payment failed", "order_id", "123", "error", err)
+tel.Log().Error("payment failed", "order_id", "123", "error", err)
 
 // Debug só aparece se LogLevel=Debug
-tel.Logger.DebugContext(ctx, "cache hit", "key", "user:123")
+tel.Log().Debug("cache hit", "key", "user:123")
 ```
+
+> A abstração `Log()` não recebe ctx: a correlação trace→log usa o
+> contexto-base internamente. Para correlação request-scoped, os logs do
+> Middleware já fazem isso automaticamente (via span do request). O campo cru
+> `tel.Logger` (*slog.Logger) continua disponível para quem precisa de ctx.
 
 **stdout:**
 
@@ -436,7 +460,7 @@ observabilidade automática (trace + métricas + log) sem boilerplate. O erro de
 `fn` é repassado, então o caller decide retry/backoff.
 
 ```go
-err := tel.Worker(ctx, "process_order",
+err := tel.Worker("process_order",
 	func(ctx context.Context) error {
 		return process(ctx, msg)
 	},
@@ -474,8 +498,7 @@ Carrega `.env` **somente em Development**:
 func main() {
 	telemetry.Loading() // carrega .env (dev/unset) + valida HELLNET_*; pula em Production/Staging
 
-	opts := telemetry.Default()
-	tel, _ := telemetry.New(opts)
+	tel, _ := telemetry.New(context.Background())
 }
 ```
 
@@ -518,12 +541,12 @@ c.Metrics().Float64Histogram("latency_s").Record(ctx, d.Seconds())
 // também direto no tel (sem passar pelo Client):
 tel.Meter.Counter("hellnet_smoke_ops_total")
 
-// Traces
-_, span := c.Trace().Start(ctx, "order")
+// Traces (escape hatch avançado; fluxo padrão é tel.WithSpan)
+_, span := c.Trace().Start(parentCtx, "order")
 defer span.End()
 
-// Logs (níveis padrão slog, com/sem ctx)
-c.Log().ErrorContext(ctx, "boom", "err", err)
+// Logs (níveis padrão slog, sem ctx — correlação via contexto-base)
+c.Log().Error("boom", "err", err)
 c.Log().Info("started")
 ```
 
@@ -536,18 +559,18 @@ tracing estão desligados, os acessores retornam implementações noop (nunca `n
 
 | Function | Description |
 |---|---|
-| `telemetry.New(opts)` | Setup all-in-one |
-| `telemetry.Default()` | Options a partir de env `HELLNET_*` |
+| `telemetry.New(ctx, opts...)` | Setup all-in-one; **ctx da app passado UMA vez** (baseCtx interno) |
+| `telemetry.MustNew(ctx, opts...)` | Como `New`, mas entra em pânico em erro |
 | `telemetry.Loading()` | Carrega `.env` (dev) + valida envs |
-| `telemetry.Middleware(tel, handler)` | HTTP tracing + request metrics + logging |
+| `telemetry.Middleware(tel, handler)` | HTTP tracing + request metrics + logging (request-scoped) |
 | `tel.Live()` / `tel.Ready()` / `tel.Health()` | Health probes (`http.Handler`) |
-| `tel.HealthRegister(name, fn)` | Custom health check (DB, redis, downstream) |
+| `tel.HealthRegister(name, fn)` | Custom health check — ctx **fornecido pela lib** |
 | `tel.MetricsHandler()` | `http.Handler` Prometheus `/metrics` |
-| `tel.WithSpan(ctx, name, fn)` | Span + erro automático + `exceptions_total` em panic |
-| `tel.Tracer.Start(ctx, name)` | Cria span de trace |
+| `tel.WithSpan(name, fn)` | Span (raiz = baseCtx) + erro automático + `exceptions_total` em panic |
+| `tel.Trace().Start(ctx, name)` | Escape hatch avançado: span enraizado num ctx próprio |
 | `tel.Meter.Counter/Gauge/Histogram(name)` | Atalhos int64 de métrica |
-| `tel.Logger.InfoContext/ErrorContext(...)` | Logging estruturado (stdout + OTLP) |
-| `tel.Worker(ctx, job, fn, extra...)` | Job/worker: span + `worker_*` metrics |
+| `tel.Log().Info/Error(...)` | Logging estruturado sem ctx (stdout + OTLP) |
+| `tel.Worker(job, fn, extra...)` | Job/worker: span + `worker_*` metrics (ctx vem do baseCtx) |
 | `tel.HTTPClient(base)` | `*http.Client` com métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
 | `tel.Shutdown()` | Flush OTLP + Prometheus |

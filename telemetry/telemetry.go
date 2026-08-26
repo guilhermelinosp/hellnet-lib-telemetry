@@ -1,21 +1,34 @@
 // Package telemetry provides opinionated OpenTelemetry observability for Go services.
 //
+// Application context model (IMPORTANT): the application context is passed
+// ONCE at construction and propagated internally.
+//
 // Usage:
 //
-//	tel := telemetry.New("my-service")
+//	// Pass your application-root context here — everything the lib runs
+//	// (spans, workers, health checks, logs) inherits it. This is THE single
+//	// place apps attach long-lived OTel baggage / propagator carriers.
+//	tel, err := telemetry.New(ctx, telemetry.Options{ServiceName: "my-service"})
 //	defer tel.Shutdown()
 //
-//	// Tracing
-//	ctx, span := tel.Tracer.Start(ctx, "operation")
-//	span.SetAttributes(attribute.String("key", "val"))
-//	span.End()
+//	// Tracing (no ctx in the API — spans derive from the base context)
+//	err := tel.WithSpan("operation", func(ctx context.Context) error {
+//		span := trace.SpanFromContext(ctx) // continues this span
+//		return doWork(ctx)
+//	})
 //
 //	// Metrics
 //	counter, _ := tel.Meter.Counter("requests.total")
-//	counter.Add(ctx, 1)
+//	counter.Add(context.Background(), 1)
 //
-//	// Logging (via slog → stdout + OTLP → Loki)
-//	tel.Logger.InfoContext(ctx, "processing", "id", orderID)
+//	// Logging (via slog → stdout + OTLP → Loki), correlated with the
+//	// base-context trace lineage internally
+//	tel.Log().Info("processing", "id", orderID)
+//
+// Correlation consequence: application-level traces form a single lineage
+// rooted at the base context (WithSpan/Worker spawn children under it).
+// Request-scoped traces extracted by the HTTP Middleware remain independent:
+// they originate from inbound requests, which is correct server-side behavior.
 package telemetry
 
 import (
@@ -62,6 +75,12 @@ type Telemetry struct {
 	Tracer trace.Tracer
 	Meter  Meter
 	Logger *slog.Logger
+
+	// baseCtx é o contexto-raiz da aplicação, informado UMA vez em New/MustNew.
+	// É o único ponto de acoplamento app→lib: todo ctx interno (spans de
+	// WithSpan/Worker, logs correlacionados) deriva dele. App context passed
+	// once at construction; everything the lib runs inherits it.
+	baseCtx context.Context
 
 	serviceName  string
 	otlpEndpoint string
@@ -192,10 +211,23 @@ func loadEnvFiles() {
 }
 
 // New creates a fully initialized Telemetry instance.
+//
+// # Application context — passed ONCE here
+//
+// ctx é o contexto-RAIZ da aplicação e fica retido internamente (baseCtx, não
+// exportado): toda execução da lib (spans de WithSpan/Worker, health checks,
+// logs correlacionados) deriva dele. Passe aqui o seu contexto-root com os
+// carregadores de baggage/propagators OTel de longa duração — não há outro
+// lugar para anexá-los (nenhum método da lib recebe ctx de app).
+//
+// Correlação resultante: traces de aplicação formam UMA linhagem com raiz no
+// baseCtx (WithSpan/Worker criam filhos sob ele); traces request-scoped extraídos
+// pelo Middleware HTTP permanecem independentes (origem: requests inbound).
+//
 // Sem argumentos, carrega o .env (dev) + lê as envs HELLNET_*
 // obrigatórias (env-first) e usa telemetry.LoadFromEnv(). Com Options explícitas,
 // usa-as diretamente (sobrescrevendo o env — útil em testes/embed).
-func New(opts ...Options) (*Telemetry, error) {
+func New(ctx context.Context, opts ...Options) (*Telemetry, error) {
 	// Env-first: sempre carrega .env (dev) + lê envs; opts sobrescrevem.
 	loadEnvFiles()
 
@@ -206,6 +238,9 @@ func New(opts ...Options) (*Telemetry, error) {
 
 	if o.ServiceName == "" {
 		return nil, ErrMissingServiceName
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	// Build resource with service info
@@ -225,6 +260,7 @@ func New(opts ...Options) (*Telemetry, error) {
 	}
 
 	tel := &Telemetry{
+		baseCtx:      ctx,
 		serviceName:  o.ServiceName,
 		otlpEndpoint: o.OTLPEndpoint,
 	}
@@ -251,12 +287,45 @@ func New(opts ...Options) (*Telemetry, error) {
 }
 
 // MustNew is like New but panics on error. Use at startup.
-func MustNew(opts ...Options) *Telemetry {
-	t, err := New(opts...)
+// O ctx passado é retido como contexto-base (ver New — application context
+// passed once at construction).
+func MustNew(ctx context.Context, opts ...Options) *Telemetry {
+	t, err := New(ctx, opts...)
 	if err != nil {
 		panic(err)
 	}
 	return t
+}
+
+// baseContext devolve o contexto-base informado em New, ou context.Background()
+// quando o Telemetry foi construído manualmente (valor-zero — ex.: testes).
+// Tudo que a lib executa deriva deste ctx: é a única raiz de correlação de app.
+func (t *Telemetry) baseContext() context.Context {
+	if t.baseCtx == nil {
+		return context.Background()
+	}
+	return t.baseCtx
+}
+
+// logIn registra um log correlacionado ao ctx informado (ex.: span de request
+// capturado pelo Middleware, ou span interno do Worker), preservando a
+// correlação trace→log nos sinks (contextTraceHandler no stdout e otelslog via
+// OTLP) sem expor ctx na abstração pública Logger. Nil-safe (slog.Default).
+func (t *Telemetry) logIn(ctx context.Context, level slog.Level, msg string, args ...any) {
+	l := t.Logger
+	if l == nil {
+		l = slog.Default()
+	}
+	switch level {
+	case slog.LevelDebug:
+		l.DebugContext(ctx, msg, args...)
+	case slog.LevelWarn:
+		l.WarnContext(ctx, msg, args...)
+	case slog.LevelError:
+		l.ErrorContext(ctx, msg, args...)
+	default:
+		l.InfoContext(ctx, msg, args...)
+	}
 }
 
 // buildLogger monta o Logger (stdout JSON + OTLP → Loki) com redação e
@@ -381,6 +450,10 @@ func (t *Telemetry) MetricsHandler() http.Handler {
 
 // HealthRegister registra um health check customizado (ex.: DB, redis, downstream).
 // Executado em /ready e /health; falha marca o serviço como degraded.
+//
+// O parâmetro check MANTÉM o signature func(ctx context.Context) error, mas o
+// ctx é FORNECIDO PELA LIB na execução (derivado do request da chamada HTTP de
+// health, com timeouts internos existentes) — apps não precisam gerenciá-lo.
 func (t *Telemetry) HealthRegister(name string, check func(ctx context.Context) error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -390,14 +463,26 @@ func (t *Telemetry) HealthRegister(name string, check func(ctx context.Context) 
 	t.healthChecks[name] = check
 }
 
-// WithSpan cria um span, executa fn e finaliza. Em erro, marca o span com o status.
-func (t *Telemetry) WithSpan(ctx context.Context, name string, fn func(ctx context.Context) error) error {
-	ctx, span := t.Trace().Start(ctx, name)
-	defer span.End()
-	// Recupera panics automaticamente, contabilizando exceções
-	// (exceptions_total) e marcando o span como erro, preservando o
-	// comportamento original ao re-propagar o panic.
+// WithSpan cria um span (filho do contexto-base informado em New), executa fn
+// e finaliza. Em erro, marca o span com o status. O ctx derivado (contendo o
+// span) é repassado para fn, permitindo que código otel-instrumentado mais a
+// fundo continue a linhagem: raiz(baseCtx) → filhos.
+func (t *Telemetry) WithSpan(name string, fn func(ctx context.Context) error) error {
+	_, err := t.runBaseSpan(name, fn)
+	return err
+}
+
+// runBaseSpan centraliza o ciclo de vida de um span de aplicação para
+// WithSpan/Worker: deriva o ctx do contexto-base (raiz da linhagem), repassa o
+// ctx derivado para fn, recupera panics (incrementando exceptions_total,
+// marcando o span como erro e re-propagando o panic) e marca erro no span.
+// Retorna o ctx contendo o span (útil p/ correlação de métricas/log internos).
+func (t *Telemetry) runBaseSpan(name string, fn func(ctx context.Context) error) (context.Context, error) {
+	ctx, span := t.Trace().Start(t.baseContext(), name)
 	defer func() {
+		// Recupera panics automaticamente, contabilizando exceções
+		// (exceptions_total) e marcando o span como erro, preservando o
+		// comportamento original ao re-propagar o panic.
 		if r := recover(); r != nil {
 			if t.Meter != nil {
 				if c, err := t.Meter.Counter("exceptions_total"); err == nil {
@@ -412,12 +497,13 @@ func (t *Telemetry) WithSpan(ctx context.Context, name string, fn func(ctx conte
 			panic(r)
 		}
 	}()
+	defer span.End()
 	if err := fn(ctx); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return ctx, err
 	}
-	return nil
+	return ctx, nil
 }
 
 // gcPauseBoundaries são buckets explícitos (segundos) para pausas de GC
@@ -840,17 +926,17 @@ func (e *configError) Error() string { return e.msg }
 // ───────────────────────── Abstração (Client) ─────────────────────────
 
 // Logger é a abstração de logs (níveis padrão slog, sem Trace).
-// Espelha a superfície do *slog.Logger para permitir DI/mock.
+// Espelha a superfície básica do *slog.Logger para permitir DI/mock.
+//
+// Não recebe ctx: a correlação de trace usa o contexto-base (definido em New)
+// internamente nos sinks (contextTraceHandler/otelslog). Correlação
+// request-scoped fica no Middleware, que correlaciona via pacote (logIn).
 type Logger interface {
 	Debug(msg string, args ...any)
-	DebugContext(ctx context.Context, msg string, args ...any)
 	Info(msg string, args ...any)
-	InfoContext(ctx context.Context, msg string, args ...any)
 	Warn(msg string, args ...any)
-	WarnContext(ctx context.Context, msg string, args ...any)
 	Error(msg string, args ...any)
-	ErrorContext(ctx context.Context, msg string, args ...any)
-	// With retorna um logger com atributos pré-populados (contextual).
+	// With retorna um logger com atributos pré-populados.
 	With(args ...any) Logger
 }
 
@@ -880,6 +966,10 @@ func (a meterAdapter) Histogram(n string) (metric.Int64Histogram, error) {
 }
 
 // Tracer abstrai a criação de spans (assinatura idêntica a trace.Tracer.Start).
+//
+// ESCAPE HATCH avançado: recebe ctx do CALLER explicitamente e não faz parte
+// do fluxo padrão de correlação (que é raiz(baseCtx) → filhos via
+// WithSpan/Worker). A superfície ctx-free é WithSpan/Worker apenas.
 type Tracer interface {
 	Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span)
 }
@@ -890,20 +980,26 @@ type Tracer interface {
 //	var c telemetry.Client = tel
 //	c.Meter.Counter("req_total")        // int64 (atalho)
 //	c.Meter.Float64Histogram("lat_s")   // float (superfície crua)
-//	_, span := c.Trace().Start(ctx, "op"); defer span.End()
-//	c.Log().ErrorContext(ctx, "boom", "err", err)
+//	c.WithSpan("op", func(ctx context.Context) error { ... })
+//	c.Log().Error("boom", "err", err)
 type Client interface {
 	Log() Logger
 	Trace() Tracer
 	Metrics() Meter
 	Shutdown() error
-	WithSpan(ctx context.Context, name string, fn func(ctx context.Context) error) error
-	Worker(ctx context.Context, job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
+	WithSpan(name string, fn func(ctx context.Context) error) error
+	Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
 }
 
 // ── implementação (non-breaking: *Telemetry satisfaz Client) ──
 
-type slogLogger struct{ l *slog.Logger }
+// slogLogger implementa Logger sem ctx na superfície. Internamente usa o
+// contexto-base (retido em New) nas chamadas *Context do slog, mantendo a
+// correlação trace→log (stdout e OTLP) para a linhagem raiz(baseCtx)→filhos.
+type slogLogger struct {
+	l   *slog.Logger
+	ctx context.Context // contexto-base derivado de Telemetry.baseCtx
+}
 
 func (s slogLogger) base() *slog.Logger {
 	if s.l == nil {
@@ -912,31 +1008,30 @@ func (s slogLogger) base() *slog.Logger {
 	return s.l
 }
 
-func (s slogLogger) Debug(msg string, a ...any) { s.base().Debug(msg, a...) }
-func (s slogLogger) DebugContext(ctx context.Context, msg string, a ...any) {
-	s.base().DebugContext(ctx, msg, a...)
-}
-func (s slogLogger) Info(msg string, a ...any) { s.base().Info(msg, a...) }
-func (s slogLogger) InfoContext(ctx context.Context, msg string, a ...any) {
-	s.base().InfoContext(ctx, msg, a...)
-}
-func (s slogLogger) Warn(msg string, a ...any) { s.base().Warn(msg, a...) }
-func (s slogLogger) WarnContext(ctx context.Context, msg string, a ...any) {
-	s.base().WarnContext(ctx, msg, a...)
-}
-func (s slogLogger) Error(msg string, a ...any) { s.base().Error(msg, a...) }
-func (s slogLogger) ErrorContext(ctx context.Context, msg string, a ...any) {
-	s.base().ErrorContext(ctx, msg, a...)
+func (s slogLogger) logCtx() context.Context {
+	if s.ctx == nil {
+		return context.Background()
+	}
+	return s.ctx
 }
 
+func (s slogLogger) Debug(msg string, a ...any) { s.base().DebugContext(s.logCtx(), msg, a...) }
+func (s slogLogger) Info(msg string, a ...any)  { s.base().InfoContext(s.logCtx(), msg, a...) }
+func (s slogLogger) Warn(msg string, a ...any)  { s.base().WarnContext(s.logCtx(), msg, a...) }
+func (s slogLogger) Error(msg string, a ...any) { s.base().ErrorContext(s.logCtx(), msg, a...) }
+
 func (s slogLogger) With(a ...any) Logger {
-	return slogLogger{s.base().With(a...)}
+	return slogLogger{l: s.base().With(a...), ctx: s.ctx}
 }
 
 // Log retorna a abstração de logs. Nome evita colisão com o campo exportado Logger.
-func (t *Telemetry) Log() Logger { return slogLogger{t.Logger} }
+// O logger retornado deriva correlação do contexto-base internamente.
+func (t *Telemetry) Log() Logger { return slogLogger{l: t.Logger, ctx: t.baseCtx} }
 
 // Trace retorna a abstração de traces. Nome evita colisão com o campo exportado Tracer.
+//
+// Uso interno da lib SEMPRE deriva do contexto-base (runBaseSpan); use apenas
+// como escape hatch avançado quando precisar enraizar spans num ctx próprio.
 func (t *Telemetry) Trace() Tracer {
 	if t.Tracer == nil {
 		return otel.Tracer(t.serviceName)
