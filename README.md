@@ -314,11 +314,11 @@ agregação do SDK, dois readers no mesmo provider).
 - `http_requests_body_size_bytes` — histograma do tamanho do corpo da requisição (via `Content-Length`)
 - `http_server_errors_total{method}` — respostas com status ≥ 400 (taxa de erro)
 
-**HTTP — cliente (`tel.HTTPClient`)** `{method,status,host}`:
+**HTTP — cliente (`tel.HTTPClient`)** `{method,status,host[,outcome]}`:
 
-- `http_client_requests_total`
-- `http_client_request_duration_seconds`
-- `http_client_requests_inflight`
+- `http_client_requests_total` — total de tentativas de saída
+- `http_client_request_duration_seconds{outcome=success|retry|error}` — histograma por tentativa
+- `http_client_requests_inflight` — chamadas de saída em voo
 
 **Workers (`tel.Worker`)** `{job,status[,extra]}`:
 
@@ -497,15 +497,54 @@ server.ListenAndServe()
 {"time":"...","level":"INFO","msg":"request completed","method":"GET","path":"/api/users","host":"localhost:8080","status":200,"duration":12.345678}
 ```
 
-### HTTP client instrumentation
+### HTTP client instrumentado
 
-`tel.HTTPClient(base)` retorna um `*http.Client` que já registra as métricas
-`http_client_*` automaticamente:
+> 🧒 **Entenda com 15 anos:** o mensageiro que leva o crachá do trace junto —
+> e, se a porta estiver ocupada, bate de novo com educação antes de desistir.
+
+`tel.HTTPClient(opts ...HTTPOption) *http.Client` cria um client de SAÍDA com
+OpenTelemetry completo (contraparte do Middleware server-side):
+
+- **Propagação W3C**: header `traceparent` injetado automaticamente — o serviço
+  downstream continua o MESMO trace (span CLIENT por tentativa, filho do span
+  ativo no seu código);
+- **Retry com backoff** (dobra até 5s, jitter ±20%) em erros transitórios
+  (rede + 429/5xx), apenas para métodos idempotentes (`GET`, `HEAD`, `PUT`,
+  `DELETE`) — `POST`/`PATCH` **nunca** repetem;
+- **Timeout por tentativa** via `WithBaseTimeout` (o prazo total é o `ctx`
+  que você passa na request);
+- **Métricas por tentativa**: `http_client_requests_total{method,host,status}`,
+  `http_client_request_duration_seconds{method,host,outcome}`,
+  `http_client_requests_inflight`;
+- Log WARN automático quando todas as tentativas falham.
 
 ```go
-client := tel.HTTPClient(nil) // nil = http.DefaultClient
-resp, err := client.Get("https://api.external/")
+client := tel.HTTPClient(
+	telemetry.WithBaseTimeout(5*time.Second),
+	telemetry.WithMaxRetries(2),
+)
+
+err := tel.WithSpan("sync-upstream", func(ctx context.Context) error {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://api.example.com/orders", nil)
+	resp, err := client.Do(req) // traz traceparent automaticamente
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return process(resp.Body)
+})
 ```
+
+| Opção | Default | O que faz |
+|---|---|---|
+| `WithBaseTimeout(d)` | `10s` | Timeout **por tentativa** (inclui ler o body) |
+| `WithMaxRetries(n)` | `2` | Retries extras; tentativas = n+1; `0` desliga |
+| `WithRetryBackoff(base)` | `100ms` | Delay inicial entre tentativas (dobra até 5s, jitter ±20%) |
+| `WithExtraTransport(rt)` | clone de `DefaultTransport` | Transporte interno customizado (proxy/TLS/dial) |
+
+> A propagação W3C é sempre ligada na factory (independe de
+> `RegisterGlobals`) — apps com DI/testes continuam propagando o trace.
 
 ---
 
@@ -631,7 +670,7 @@ tracing estão desligados, os acessores retornam implementações noop (nunca `n
 | `tel.Meter.Counter/Gauge/Histogram(name)` | Atalhos int64 de métrica |
 | `tel.Log().Info/Error(...)` | Logging estruturado sem ctx (stdout + OTLP) |
 | `tel.Worker(job, fn, extra...)` | Job/worker: span + `worker_*` metrics (ctx vem do baseCtx) |
-| `tel.HTTPClient(base)` | `*http.Client` com métricas `http_client_*` |
+| `tel.HTTPClient(opts...)` | `*http.Client` outbound: trace W3C + retry/backoff + métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
 | `tel.Shutdown()` | Flush OTLP + Prometheus |
 | `opts.RedactSensitive` / `opts.RedactKeys` | Mascara PII nos logs |

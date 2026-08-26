@@ -1694,41 +1694,8 @@ func TestWithSpanRecoversPanic(t *testing.T) {
 	}
 }
 
-func TestHTTPClientTransport(t *testing.T) {
-	tel, reader := newTestTelemetry()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
-	}))
-	defer srv.Close()
-
-	client := tel.HTTPClient(nil)
-	resp, err := client.Get(srv.URL)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	resp.Body.Close()
-
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
-	}
-
-	var total int64
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name == "http_client_requests_total" {
-				if sum, ok := m.Data.(metricdata.Sum[int64]); ok && len(sum.DataPoints) > 0 {
-					total = sum.DataPoints[0].Value
-				}
-			}
-		}
-	}
-	if total != 1 {
-		t.Fatalf("http_client_requests_total = %d, want 1", total)
-	}
-}
+// (o antigo TestHTTPClientTransport foi substituído por telemetry/httpclient_test.go,
+// que cobre a factory tel.HTTPClient(opts...) completa: tracing, retry e métricas.)
 
 // ── mock SQL driver (sem dependências externas) ──
 

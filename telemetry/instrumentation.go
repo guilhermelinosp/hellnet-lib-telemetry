@@ -576,84 +576,10 @@ func readThreads() (int64, error) {
 }
 
 // ─────────────────── HTTP client (outbound) ───────────────────
-
-// HTTPClientTransport é um http.RoundTripper que instrumenta automaticamente
-// chamadas HTTP de saída (paridade com prometheus-net HttpClient): latência,
-// total e inflight, particionados por método/host/status. Use via
-// tel.HTTPClient(nil) ou tel.NewHTTPClientTransport(transport).
-type HTTPClientTransport struct {
-	base             http.RoundTripper
-	requestsTotal    metric.Int64Counter
-	requestDuration  metric.Float64Histogram
-	requestsInflight metric.Int64UpDownCounter
-}
-
-// NewHTTPClientTransport cria um transporte instrumentado sobre base. Se base
-// for nil, usa http.DefaultTransport.
-func (t *Telemetry) NewHTTPClientTransport(base http.RoundTripper) *HTTPClientTransport {
-	m := t.Meter
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	rt := &HTTPClientTransport{base: base}
-	rt.requestsTotal, _ = m.Counter("http_client_requests_total")
-	rt.requestDuration, _ = m.Float64Histogram(
-		"http_client_request_duration_seconds",
-		metric.WithDescription("Duração de requests HTTP de saída em segundos"),
-		metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...),
-	)
-	rt.requestsInflight, _ = m.Int64UpDownCounter(
-		"http_client_requests_inflight",
-		metric.WithDescription("Requests HTTP de saída em voo"),
-	)
-	return rt
-}
-
-// HTTPClient devolve um *http.Client cujo transporte é instrumentado para
-// requests de saída. Se base for nil, cria um client com defaults.
-func (t *Telemetry) HTTPClient(base *http.Client) *http.Client {
-	c := &http.Client{}
-	if base != nil {
-		*c = *base
-	}
-	c.Transport = t.NewHTTPClientTransport(c.Transport)
-	return c
-}
-
-// RoundTrip implementa http.RoundTripper, registando as métricas da chamada.
-func (rt *HTTPClientTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	ctx := req.Context()
-	method := req.Method
-	host := ""
-	if req.URL != nil {
-		host = req.URL.Host
-	}
-	baseAttrs := []attribute.KeyValue{
-		attribute.String("method", method),
-		attribute.String("host", host),
-	}
-
-	rt.requestsInflight.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
-	start := time.Now()
-	resp, err := rt.base.RoundTrip(req)
-	elapsed := time.Since(start).Seconds()
-	rt.requestsInflight.Add(ctx, -1, metric.WithAttributes(baseAttrs...))
-
-	if err != nil {
-		attrs := append(append([]attribute.KeyValue{}, baseAttrs...),
-			attribute.Int("status", 0))
-		rt.requestsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
-		rt.requestDuration.Record(ctx, elapsed, metric.WithAttributes(attrs...))
-		return resp, err
-	}
-
-	status := resp.StatusCode
-	attrs := append(append([]attribute.KeyValue{}, baseAttrs...),
-		attribute.Int("status", status))
-	rt.requestsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
-	rt.requestDuration.Record(ctx, elapsed, metric.WithAttributes(attrs...))
-	return resp, err
-}
+//
+// O lado de SAÍDA movou-se para httpclient.go: a factory tel.HTTPClient(opts...)
+// devolve um client com tracing W3C, retry/backoff idempotente e métricas
+// por tentativa (família http_client_*).
 
 // ─────────────────── SQL / DB (connection pool) ───────────────────
 
