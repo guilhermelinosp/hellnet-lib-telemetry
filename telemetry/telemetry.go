@@ -26,9 +26,11 @@
 //	tel.Log().Info("processing", "id", orderID)
 //
 // Correlation consequence: application-level traces form a single lineage
-// rooted at the base context (WithSpan/Worker spawn children under it).
-// Request-scoped traces extracted by the HTTP Middleware remain independent:
-// they originate from inbound requests, which is correct server-side behavior.
+// rooted at the base context (WithSpan/Worker spawn children under it), and
+// nested WithSpan/Worker calls inside fn automatically become CHILDREN of the
+// active span. Request-scoped traces extracted by the HTTP Middleware remain
+// independent: they originate from inbound requests, which is correct
+// server-side behavior.
 package telemetry
 
 import (
@@ -82,6 +84,13 @@ type Telemetry struct {
 	// WithSpan/Worker, logs correlacionados) deriva dele. App context passed
 	// once at construction; everything the lib runs inherits it.
 	baseCtx context.Context
+
+	// spanStack guarda os spanCtxs ativos derivados por runBaseSpan (LIFO),
+	// permitindo que chamadas aninhadas de WithSpan/Worker nasçam como FILHAS
+	// do span desta lib em execução (em vez de irmãs enraizadas no baseCtx).
+	// Protegida por spanMu; entradas são *spanEntry p/ remoção por identidade.
+	spanMu    sync.Mutex
+	spanStack []*spanEntry
 
 	serviceName  string
 	otlpEndpoint string
@@ -355,7 +364,7 @@ func (t *Telemetry) buildLogger(o Options, res *sdkresource.Resource) error {
 
 	// MultiHandler: writes to BOTH stdout AND OTLP; errorCountHandler
 	// conta erros logados automaticamente (log_errors_total).
-	t.Logger = slog.New(&errorCountHandler{Handler: slog.NewMultiHandler(stdoutHandler, otelHandler), tel: t})
+	t.Logger = slog.New(newErrorCountHandler(slog.NewMultiHandler(stdoutHandler, otelHandler), t))
 	if o.RegisterGlobals {
 		slog.SetDefault(t.Logger)
 	}
@@ -401,30 +410,49 @@ func (t *Telemetry) buildMeter(o Options, res *sdkresource.Resource) error {
 	return nil
 }
 
-// Shutdown flushes telemetry data and cleans up resources with a 5s timeout.
-// Call with defer when the service terminates.
+// Shutdown flushes telemetry data and cleans up resources. Each provider
+// (logs/traces/metrics) gets a DEDICATED 5s timeout context and the three
+// shut down IN PARALLEL — one slow/timing-out provider no longer consumes the
+// budget of the others. Errors are aggregated in stable order
+// (logs → traces → metrics). Call with defer when the service terminates.
 func (t *Telemetry) Shutdown() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	const shutdownTimeout = 5 * time.Second
 
-	var errs []error
+	// shutters em ordem estável para a agregação de erros (logs → traces → metrics).
+	var shutters []func(context.Context) error
 	if t.lp != nil {
-		if err := t.lp.Shutdown(ctx); err != nil {
-			errs = append(errs, err)
-		}
+		shutters = append(shutters, t.lp.Shutdown)
 	}
 	if t.tp != nil {
-		if err := t.tp.Shutdown(ctx); err != nil {
-			errs = append(errs, err)
-		}
+		shutters = append(shutters, t.tp.Shutdown)
 	}
 	if t.mp != nil {
-		if err := t.mp.Shutdown(ctx); err != nil {
-			errs = append(errs, err)
+		shutters = append(shutters, t.mp.Shutdown)
+	}
+
+	// Cada provider desliga em PARALELO com orçamento próprio de 5s; escreve
+	// no slot próprio e lê após Wait (happens-before via WaitGroup).
+	errs := make([]error, len(shutters))
+	var wg sync.WaitGroup
+	for i := range shutters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			errs[i] = shutters[i](ctx)
+		}()
+	}
+	wg.Wait()
+
+	var agg []error
+	for _, err := range errs {
+		if err != nil {
+			agg = append(agg, err)
 		}
 	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
+	if len(agg) > 0 {
+		return errors.Join(agg...)
 	}
 	return nil
 }
@@ -464,22 +492,83 @@ func (t *Telemetry) HealthRegister(name string, check func(ctx context.Context) 
 	t.healthChecks[name] = check
 }
 
-// WithSpan cria um span (filho do contexto-base informado em New), executa fn
-// e finaliza. Em erro, marca o span com o status. O ctx derivado (contendo o
-// span) é repassado para fn, permitindo que código otel-instrumentado mais a
-// fundo continue a linhagem: raiz(baseCtx) → filhos.
+// WithSpan cria um span, executa fn e finaliza. Em erro, marca o span com o
+// status. O ctx derivado (contendo o span) é repassado para fn, permitindo que
+// código otel-instrumentado mais a fundo continue a linhagem.
+//
+// Aninhamento automático: chamadas a WithSpan/Worker DENTRO de fn tornam-se
+// FILHAS do span ativo desta lib (a lib guarda internamente o spanCtx atual;
+// o pai preferido é esse ctx quando presente, caindo para o baseCtx na raiz).
+// Assim a linhagem aninha naturalmente: raiz(baseCtx) → outer → inner → …,
+// sem precisar repassar ctx pela API pública (que permanece ctx-free).
 func (t *Telemetry) WithSpan(name string, fn func(ctx context.Context) error) error {
 	_, err := t.runBaseSpan(name, fn)
 	return err
 }
 
+// spanKey marca internamente ctxs carregando um span criado por ESTA lib
+// (runBaseSpan). Permite distinguir spans app-level (WithSpan/Worker) de spans
+// request-scoped extraídos pelo Middleware (estes NÃO carregam a chave), e é o
+// mecanismo pelo qual chamadas aninhadas enxergam o pai ativo.
+type spanKey struct{}
+
+// spanEntry guarda um spanCtx ativo na pilha de aninhamento da instância. É
+// ponteiro para permitir remoção por identidade sem comparar ctxs (==) diretamente.
+type spanEntry struct {
+	ctx context.Context
+}
+
+// currentSpanParent devolve o pai do próximo span criado por runBaseSpan:
+// quando há um span desta lib ativo (topo da pilha de aninhamento), retorna-o
+// (o novo span nasce FILHO dele); caso contrário (ou se o span do topo não é
+// mais válido — ex.: tracing desligado), enraíza no contexto-base.
+func (t *Telemetry) currentSpanParent() context.Context {
+	t.spanMu.Lock()
+	defer t.spanMu.Unlock()
+	if n := len(t.spanStack); n > 0 {
+		if sc := trace.SpanContextFromContext(t.spanStack[n-1].ctx); sc.IsValid() {
+			return t.spanStack[n-1].ctx
+		}
+	}
+	return t.baseContext()
+}
+
+// pushSpanCtx empilha o spanCtx recém-criado (chamado em runBaseSpan).
+func (t *Telemetry) pushSpanCtx(e *spanEntry) {
+	t.spanMu.Lock()
+	defer t.spanMu.Unlock()
+	t.spanStack = append(t.spanStack, e)
+}
+
+// popSpanCtx remove a própria entrada da pilha de aninhamento (LIFO; o defer
+// garante a execução mesmo quando um panic é re-propagado).
+func (t *Telemetry) popSpanCtx(e *spanEntry) {
+	t.spanMu.Lock()
+	defer t.spanMu.Unlock()
+	for i := len(t.spanStack) - 1; i >= 0; i-- {
+		if t.spanStack[i] == e {
+			t.spanStack = append(t.spanStack[:i], t.spanStack[i+1:]...)
+			return
+		}
+	}
+}
+
 // runBaseSpan centraliza o ciclo de vida de um span de aplicação para
-// WithSpan/Worker: deriva o ctx do contexto-base (raiz da linhagem), repassa o
-// ctx derivado para fn, recupera panics (incrementando exceptions_total,
-// marcando o span como erro e re-propagando o panic) e marca erro no span.
-// Retorna o ctx contendo o span (útil p/ correlação de métricas/log internos).
+// WithSpan/Worker: deriva o ctx do pai ativo (span aninhado desta lib quando
+// presente, senão o contexto-base raiz), repassa o ctx derivado para fn,
+// recupera panics (incrementando exceptions_total, marcando o span como erro e
+// re-propagando o panic) e marca erro no span. Retorna o ctx contendo o span
+// (útil p/ correlação de métricas/log internos).
 func (t *Telemetry) runBaseSpan(name string, fn func(ctx context.Context) error) (context.Context, error) {
-	ctx, span := t.Trace().Start(t.baseContext(), name)
+	parent := t.currentSpanParent()
+	rawCtx, span := t.Trace().Start(parent, name)
+	// Marca o ctx como portador de span desta lib (spanKey): chamadas aninhadas
+	// de WithSpan/Worker reconhecem-no como pai automático.
+	entry := &spanEntry{}
+	entry.ctx = context.WithValue(rawCtx, spanKey{}, struct{}{})
+	ctx := entry.ctx
+	t.pushSpanCtx(entry)
+	defer t.popSpanCtx(entry)
 	defer func() {
 		// Recupera panics automaticamente, contabilizando exceções
 		// (exceptions_total) e marcando o span como erro, preservando o
@@ -759,20 +848,35 @@ func (h contextTraceHandler) WithGroup(name string) slog.Handler {
 // slog, expondo log_errors_total. O contador é criado preguiçosamente no
 // primeiro Handle, quando tel.Meter já está disponível (o bloco de logging é
 // construído antes do de métricas no New).
+//
+// IMPORTANTE: mu e cnt são PONTEIROS compartilhados entre o handler original e
+// seus derivados (WithAttrs/WithGroup) — handlers derivados incrementam o MESMO
+// contador visível no original, inclusive durante o lazy-init (a criação feita
+// pelo derivado é vista pelo original e vice-versa). Use newErrorCountHandler.
 type errorCountHandler struct {
 	slog.Handler
 	tel *Telemetry
-	mu  sync.Mutex
-	cnt metric.Int64Counter
+	mu  *sync.Mutex
+	cnt *metric.Int64Counter
+}
+
+// newErrorCountHandler cria o handler com o estado compartilhado inicializado.
+func newErrorCountHandler(h slog.Handler, tel *Telemetry) *errorCountHandler {
+	return &errorCountHandler{
+		Handler: h,
+		tel:     tel,
+		mu:      &sync.Mutex{},
+		cnt:     new(metric.Int64Counter),
+	}
 }
 
 func (h *errorCountHandler) Handle(ctx context.Context, r slog.Record) error {
 	if r.Level >= slog.LevelError && h.tel != nil {
 		h.mu.Lock()
-		c := h.cnt
+		c := *h.cnt
 		if c == nil && h.tel.Meter != nil {
 			c, _ = h.tel.Meter.Counter("log_errors_total")
-			h.cnt = c
+			*h.cnt = c // escreve via ponteiro compartilhado: derivados + original veem
 		}
 		h.mu.Unlock()
 		if c != nil {
@@ -783,11 +887,11 @@ func (h *errorCountHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 func (h *errorCountHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &errorCountHandler{h.Handler.WithAttrs(attrs), h.tel, sync.Mutex{}, h.cnt}
+	return &errorCountHandler{h.Handler.WithAttrs(attrs), h.tel, h.mu, h.cnt}
 }
 
 func (h *errorCountHandler) WithGroup(name string) slog.Handler {
-	return &errorCountHandler{h.Handler.WithGroup(name), h.tel, sync.Mutex{}, h.cnt}
+	return &errorCountHandler{h.Handler.WithGroup(name), h.tel, h.mu, h.cnt}
 }
 
 // --- internal: logger provider ---

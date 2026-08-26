@@ -16,7 +16,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -1629,7 +1632,7 @@ func TestLogErrorsCounter(t *testing.T) {
 	tel := &Telemetry{
 		serviceName: "test-err",
 		Meter:       meterAdapter{mp.Meter("test")},
-		Logger:      slog.New(&errorCountHandler{Handler: slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}), tel: nil}),
+		Logger:      slog.New(newErrorCountHandler(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}), nil)),
 	}
 	// liga tel ao handler (como o New faz)
 	if eh, ok := tel.Logger.Handler().(*errorCountHandler); ok {
@@ -1967,5 +1970,191 @@ func TestMiddlewareBodySize(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("http_requests_body_size_bytes não foi exportado pelo Middleware")
+	}
+}
+
+// ─────────────────────── Audit fixes: I10 / N5 ───────────────────────
+
+// spanRecorder é um SpanExporter in-memory que grava spans finalizados,
+// permitindo inspecionar linhagem (SpanID/Parent SpanID) nos testes.
+type spanRecorder struct {
+	mu    sync.Mutex
+	spans []sdktrace.ReadOnlySpan
+}
+
+func (r *spanRecorder) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.spans = append(r.spans, spans...)
+	return nil
+}
+
+func (r *spanRecorder) Shutdown(context.Context) error { return nil }
+
+func (r *spanRecorder) snapshot() []sdktrace.ReadOnlySpan {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]sdktrace.ReadOnlySpan(nil), r.spans...)
+}
+
+// newLineageTestTelemetry monta um Telemetry enxuto (sem OTLP/exporters de rede)
+// com tracer SDK real gravando em rec — permite assertar relações pai/filho.
+func newLineageTestTelemetry(rec *spanRecorder) *Telemetry {
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(rec)),
+	)
+	return &Telemetry{
+		serviceName: "lineage-test",
+		Tracer:      tp.Tracer("test"),
+		Meter:       meterAdapter{sdkmetric.NewMeterProvider().Meter("noop")},
+		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}
+}
+
+// TestWithSpan_NestedSpansAreChildren valida o fix I10: WithSpan chamado
+// DENTRO de outro WithSpan cria um span FILHO (não irmão enraizado no
+// baseCtx) — inner.Parent().SpanID == outer.SpanContext().SpanID().
+func TestWithSpan_NestedSpansAreChildren(t *testing.T) {
+	rec := &spanRecorder{}
+	tel := newLineageTestTelemetry(rec)
+
+	err := tel.WithSpan("outer", func(_ context.Context) error {
+		return tel.WithSpan("inner", func(ctxInner context.Context) error {
+			// O ctx repassado ao aninhado deve carregar um span ativo válido
+			// desta lib (marcação via spanKey).
+			if !trace.SpanContextFromContext(ctxInner).IsValid() {
+				t.Error("ctx do inner não contém span ativo válido")
+			}
+			if ctxInner.Value(spanKey{}) == nil {
+				t.Error("ctx do inner não carrega a marcação spanKey desta lib")
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		t.Fatalf("WithSpan aninhado falhou: %v", err)
+	}
+
+	var outer, inner sdktrace.ReadOnlySpan
+	for _, s := range rec.snapshot() {
+		switch s.Name() {
+		case "outer":
+			outer = s
+		case "inner":
+			inner = s
+		}
+	}
+	if outer == nil || inner == nil {
+		t.Fatalf("spans esperados ausentes (outer=%v inner=%v)", outer != nil, inner != nil)
+	}
+
+	// RELAÇÃO CENTRAL DO FIX: inner é FILHO de outer.
+	if inner.Parent().SpanID() != outer.SpanContext().SpanID() {
+		t.Errorf("inner.Parent().SpanID() = %v, want %v (inner deve ser filho de outer)",
+			inner.Parent().SpanID(), outer.SpanContext().SpanID())
+	}
+	// Mesmo trace_id e ids distintos.
+	if inner.SpanContext().TraceID() != outer.SpanContext().TraceID() {
+		t.Error("inner e outer estão em traces diferentes")
+	}
+	if inner.SpanContext().SpanID() == outer.SpanContext().SpanID() {
+		t.Error("inner e outer têm o mesmo SpanID (spans não deveriam colapsar)")
+	}
+	// O span externo enraíza no contexto-base (pai ausente).
+	if outer.Parent().IsValid() {
+		t.Errorf("outer deveria ser raiz da linhagem app; parent=%v", outer.Parent())
+	}
+}
+
+// TestWithSpan_NestedConcurrentSmoke roda chamadas aninhadas concorrentes para
+// garantir que a pilha interna de spanCtxs é race-free sob -race (a linhagem
+// por-chamada não é assertada sob concorrência — contrato documentado).
+func TestWithSpan_NestedConcurrentSmoke(t *testing.T) {
+	rec := &spanRecorder{}
+	tel := newLineageTestTelemetry(rec)
+
+	const goroutines = 8
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := "g" + strconv.Itoa(i)
+			err := tel.WithSpan(name+"-outer", func(_ context.Context) error {
+				return tel.WithSpan(name+"-inner", func(context.Context) error { return nil })
+			})
+			if err != nil {
+				t.Errorf("WithSpan(%s): %v", name, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// 8 pares outer+inner exportados (SimpleSpanProcessor exporta no End).
+	if got := len(rec.snapshot()); got != goroutines*2 {
+		t.Fatalf("spans exportados = %d, want %d", got, goroutines*2)
+	}
+}
+
+// TestErrorCountHandler_DerivedSharesCounter valida o fix N5: handlers derivados
+// (WithAttrs/WithGroup) COMPARTILHAM ponteiro de estado com o original — logar
+// pelo derivado faz lazy-init/incremento visível ao original (antes: cópia
+// congelada perdia contagens).
+func TestErrorCountHandler_DerivedSharesCounter(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	tel := &Telemetry{
+		serviceName: "test-err-derived",
+		Meter:       meterAdapter{mp.Meter("test")},
+	}
+	base := newErrorCountHandler(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}), tel)
+
+	da, okA := base.WithAttrs([]slog.Attr{slog.String("k", "v")}).(*errorCountHandler)
+	dg, okG := base.WithGroup("g").(*errorCountHandler)
+	if !okA || !okG {
+		t.Fatal("derivados não são *errorCountHandler")
+	}
+
+	// Estado compartilhado por PONTEIRO (mutex e slot do contador).
+	if da.mu != base.mu || dg.mu != base.mu {
+		t.Error("mu não é compartilhado entre original e derivados")
+	}
+	if da.cnt != base.cnt || dg.cnt != base.cnt {
+		t.Fatal("cnt não é compartilhado entre original e derivados")
+	}
+	if *base.cnt != nil {
+		t.Fatal("contador deve iniciar nulo (lazy-init no primeiro Handle)")
+	}
+
+	// Loga APENAS pelo derivado mais profundo → lazy-init acontece nele...
+	slog.New(dg).ErrorContext(context.Background(), "boom via derivado")
+
+	// ...e o ORIGINAL (que nunca fez Handle) enxerga o contador inicializado:
+	if *base.cnt == nil {
+		t.Fatal("lazy-init feito pelo derivado não ficou visível no original")
+	}
+
+	// Incremento via original cai no MESMO contador (total agregado = 2).
+	slog.New(base).ErrorContext(context.Background(), "boom via original")
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	var total int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == "log_errors_total" {
+				if s, ok := m.Data.(metricdata.Sum[int64]); ok {
+					for _, dp := range s.DataPoints {
+						total += dp.Value
+					}
+				}
+			}
+		}
+	}
+	if total != 2 {
+		t.Fatalf("log_errors_total = %d, want 2 (1 via derivado + 1 via original)", total)
 	}
 }
