@@ -1,4 +1,4 @@
-# Hellnet Observability (Go)
+# hellnet-lib-telemetry
 
 Opinionated OpenTelemetry observability library for Go services — traces,
 metrics and logs out of the box, in the spirit of .NET `prometheus-net`
@@ -29,13 +29,12 @@ Telemetria é a **torre de controle** + um painelzinho de instrumentos na sua fr
 - **Sem telemetria:** dá ruim às **2h da manhã** e ninguém tem pistas — só se sabe que "não funciona".
 - **Com telemetria:** você vê exatamente **qual etapa quebrou**, o que ela registrou antes de cair
   e há quanto tempo aquilo vinha piorando.
-
-E ligar isso aqui não é um projeto: é **uma linha de setup** (`telemetry.New`) em vez de
-plugar o OpenTelemetry peça por peça na mão.
+- **Sem lib opinada:** plugar o OpenTelemetry peça por peça na mão é um projeto — **com ela**, ligar tudo
+  é **uma linha de setup** (`telemetry.New`).
 
 ### Mini-dicionário
 
-| Termo | Explicação com 15 anos |
+| Termo | Analogia |
 |---|---|
 | **log** | Linha escrita no diário de bordo: "aconteceu X às 10h" |
 | **métrica** | Número do velocímetro: req/s, memória, duração — somado ao longo do tempo |
@@ -48,8 +47,7 @@ plugar o OpenTelemetry peça por peça na mão.
 ### Primeiras linhas
 
 ```go
-// contexto entregue UMA vez — todos os relatórios herdam dele
-ctx := context.Background()
+ctx := context.Background() // contexto entregue UMA vez — todos os relatórios herdam dele
 
 tel, err := telemetry.New(ctx) // valida HELLNET_* obrigatórias
 defer func() { _ = tel.Shutdown() }() // desliga na ordem certa, sem perder relatórios
