@@ -21,7 +21,7 @@ func main() {
 	mux.Handle("GET /health", ops.Health())
 
 	ops.Logger.Info("starting server", "port", 8080)
-	if err := http.ListenAndServe(":8080", telemetry.Middleware(ops, mux)); err != nil {
+	if err := http.ListenAndServe(":8080", telemetry.Middleware(ops, mux)); err != nil { //nolint:gosec // G114: dev example server, no untrusted input
 		ops.Logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
