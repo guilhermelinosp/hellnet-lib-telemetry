@@ -325,6 +325,12 @@ func writeHealth(w http.ResponseWriter, code int, status HealthStatus) {
 // ─────────────────────────── Middleware ──────────────────────────
 
 // Middleware wraps an http.Handler with OpenTelemetry tracing + request metrics.
+//
+// A extração de contexto de trace dos requests inbound (via otelhttp) permanece
+// request-scoped por design: é correlação server-side, não "app-passing" — o
+// contexto da aplicação (baseCtx de New) não participa deste fluxo. Os logs do
+// middleware usam o ctx enriquecido com o span do request para correlação
+// trace→log nos sinks (stdout + OTLP).
 func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 	opts := []otelhttp.Option{}
 	if tel.tp != nil {
@@ -383,9 +389,9 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 		status := lrw.statusCode
 		dur := time.Since(start)
 
-		// Log de request (nil-safe: tel.Log() usa slog.Default se Logger nil)
-		tel.Log().InfoContext(
-			enriched, "request completed",
+		// Log de request correlacionado ao span do request (nil-safe:
+		// logIn usa slog.Default se Logger nil)
+		tel.logIn(enriched, slog.LevelInfo, "request completed",
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 			slog.String("host", r.Host),
@@ -463,17 +469,24 @@ var latencyBucketBoundaries = []float64{
 // job agendado (cron) ou task em background ganha observabilidade sem escrever
 // boilerplate.
 //
+// O contexto é passado UMA vez em New (baseCtx): o span do job deriva dele
+// (raiz(baseCtx) → filhos) e o ctx derivado é repassado a fn para continuação
+// da linhagem por código otel-instrumentado mais a fundo.
+//
 // Para cada execução o Worker produz, transparente para o caller:
 //   - span de trace (nome = job), com status de erro quando fn falha;
 //   - contador   worker_jobs_total{job,status[,extra]}   — total de execuções;
 //   - histograma worker_job_duration_seconds{job,status} — habilita p99/p95/p50
 //     via histogram_quantile no Prometheus/Grafana;
 //   - gauge      worker_jobs_inflight{job[,extra]}       — concorrência ativa;
-//   - log estruturado de início/fim com duração e erro (Error em falha).
+//   - log estruturado de início/fim com duração e erro (Error em falha),
+//     correlacionado ao span do job.
 //
-// O erro de fn é repassado (não tratado), então o caller decide retry/backoff.
-// extra permite atributos adicionais (fila, partition, tenant) para quebra de séries.
-func (t *Telemetry) Worker(ctx context.Context, job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error {
+// Em panic: exceptions_total é incrementada, span finalizado e o panic
+// re-propagado (paridade com WithSpan; métricas/log pós-execução não são
+// emitidos). O erro de fn é repassado (não tratado), então o caller decide
+// retry/backoff. extra permite atributos adicionais (fila, partition, tenant).
+func (t *Telemetry) Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error {
 	jobsTotal, _ := t.Meter.Counter("worker_jobs_total")
 	jobDur, _ := t.Meter.Float64Histogram("worker_job_duration_seconds",
 		metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...),
@@ -490,12 +503,12 @@ func (t *Telemetry) Worker(ctx context.Context, job string, fn func(ctx context.
 	}
 
 	if inflight != nil {
-		inflight.Add(ctx, 1, metric.WithAttributes(baseAttrs...))
-		defer inflight.Add(ctx, -1, metric.WithAttributes(baseAttrs...))
+		inflight.Add(t.baseContext(), 1, metric.WithAttributes(baseAttrs...))
+		defer inflight.Add(t.baseContext(), -1, metric.WithAttributes(baseAttrs...))
 	}
 
 	start := time.Now()
-	err := t.WithSpan(ctx, job, func(ctx context.Context) error {
+	spanCtx, err := t.runBaseSpan(job, func(ctx context.Context) error {
 		return fn(ctx)
 	})
 	dur := time.Since(start)
@@ -506,14 +519,14 @@ func (t *Telemetry) Worker(ctx context.Context, job string, fn func(ctx context.
 	}
 
 	if jobsTotal != nil {
-		jobsTotal.Add(ctx, 1, metric.WithAttributes(withStatus(status)...))
+		jobsTotal.Add(spanCtx, 1, metric.WithAttributes(withStatus(status)...))
 	}
 	if jobDur != nil {
-		jobDur.Record(ctx, dur.Seconds(), metric.WithAttributes(withStatus(status)...))
+		jobDur.Record(spanCtx, dur.Seconds(), metric.WithAttributes(withStatus(status)...))
 	}
 
 	if err != nil {
-		t.Log().ErrorContext(ctx, "worker job failed",
+		t.logIn(spanCtx, slog.LevelError, "worker job failed",
 			slog.String("job", job),
 			slog.Duration("duration", dur),
 			slog.String("error", err.Error()),
@@ -521,7 +534,7 @@ func (t *Telemetry) Worker(ctx context.Context, job string, fn func(ctx context.
 		return err
 	}
 
-	t.Log().InfoContext(ctx, "worker job completed",
+	t.logIn(spanCtx, slog.LevelInfo, "worker job completed",
 		slog.String("job", job),
 		slog.Duration("duration", dur),
 	)
