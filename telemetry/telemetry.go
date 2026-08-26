@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -88,7 +89,7 @@ type Telemetry struct {
 	healthChecks map[string]func(ctx context.Context) error
 
 	// healthStatus guarda o último status (1=pass, 0=fail) de cada health check,
-	// lido por um Int64ObservableGauge (healthcheck_status) no momento do scrape/
+	// lido por um Int64ObservableGauge (healthcheck_status) durante o scrape/
 	// export — garante exportação confiável em OTLP e Prometheus (gauges
 	// síncronos com atributo não são exportados de forma consistente pelo otelprom).
 	healthStatusMu sync.Mutex
@@ -224,7 +225,7 @@ func loadEnvFiles() {
 // baseCtx (WithSpan/Worker criam filhos sob ele); traces request-scoped extraídos
 // pelo Middleware HTTP permanecem independentes (origem: requests inbound).
 //
-// Sem argumentos, carrega o .env (dev) + lê as envs HELLNET_*
+// Sem parâmetros, carrega o .env (dev) + lê as envs HELLNET_*
 // obrigatórias (env-first) e usa telemetry.LoadFromEnv(). Com Options explícitas,
 // usa-as diretamente (sobrescrevendo o env — útil em testes/embed).
 func New(ctx context.Context, opts ...Options) (*Telemetry, error) {
@@ -567,27 +568,37 @@ func (t *Telemetry) startRuntimeMetrics() {
 		cpuInit    bool
 	)
 
+	// memI64 converts a runtime.MemStats counter (uint64) for OTel observation,
+	// clamping defensively to satisfy gosec G115 — in practice runtime memory
+	// counters never approach MaxInt64 (~9.2 EiB).
+	memI64 := func(v uint64) int64 {
+		if v > math.MaxInt64 {
+			return math.MaxInt64
+		}
+		return int64(v)
+	}
+
 	_, _ = m.RegisterCallback(
 		func(ctx context.Context, o metric.Observer) error {
 			var ms runtime.MemStats
 			runtime.ReadMemStats(&ms)
 
 			o.ObserveInt64(goroutines, int64(runtime.NumGoroutine()))
-			o.ObserveInt64(heapAlloc, int64(ms.Alloc))
-			o.ObserveInt64(heapSys, int64(ms.HeapSys))
-			o.ObserveInt64(heapInuse, int64(ms.HeapInuse))
-			o.ObserveInt64(heapReleased, int64(ms.HeapReleased))
-			o.ObserveInt64(heapObjects, int64(ms.HeapObjects))
-			o.ObserveInt64(stackInuse, int64(ms.StackInuse))
-			o.ObserveInt64(stackSys, int64(ms.StackSys))
-			o.ObserveInt64(mspanInuse, int64(ms.MSpanInuse))
-			o.ObserveInt64(mspanSys, int64(ms.MSpanSys))
-			o.ObserveInt64(mcacheInuse, int64(ms.MCacheInuse))
-			o.ObserveInt64(mcacheSys, int64(ms.MCacheSys))
-			o.ObserveInt64(otherSys, int64(ms.OtherSys))
-			o.ObserveInt64(gcSys, int64(ms.GCSys))
-			o.ObserveInt64(sysTotal, int64(ms.Sys))
-			o.ObserveInt64(totalAlloc, int64(ms.TotalAlloc))
+			o.ObserveInt64(heapAlloc, memI64(ms.Alloc))
+			o.ObserveInt64(heapSys, memI64(ms.HeapSys))
+			o.ObserveInt64(heapInuse, memI64(ms.HeapInuse))
+			o.ObserveInt64(heapReleased, memI64(ms.HeapReleased))
+			o.ObserveInt64(heapObjects, memI64(ms.HeapObjects))
+			o.ObserveInt64(stackInuse, memI64(ms.StackInuse))
+			o.ObserveInt64(stackSys, memI64(ms.StackSys))
+			o.ObserveInt64(mspanInuse, memI64(ms.MSpanInuse))
+			o.ObserveInt64(mspanSys, memI64(ms.MSpanSys))
+			o.ObserveInt64(mcacheInuse, memI64(ms.MCacheInuse))
+			o.ObserveInt64(mcacheSys, memI64(ms.MCacheSys))
+			o.ObserveInt64(otherSys, memI64(ms.OtherSys))
+			o.ObserveInt64(gcSys, memI64(ms.GCSys))
+			o.ObserveInt64(sysTotal, memI64(ms.Sys))
+			o.ObserveInt64(totalAlloc, memI64(ms.TotalAlloc))
 			o.ObserveInt64(gcTotal, int64(ms.NumGC))
 			o.ObserveInt64(gcForced, int64(ms.NumForcedGC))
 			o.ObserveFloat64(gcPauseTotal, float64(ms.PauseTotalNs)/1e9)
@@ -917,6 +928,7 @@ func buildVersion() string {
 	return info.Main.Version
 }
 
+// ErrMissingServiceName reports missing service identity configuration.
 var ErrMissingServiceName = &configError{"HELLNET_TELEMETRY_SERVICE (ou HELLNET_SERVICE) is required"}
 
 type configError struct{ msg string }
@@ -954,15 +966,15 @@ type Meter interface {
 type meterAdapter struct{ metric.Meter }
 
 func (a meterAdapter) Counter(n string) (metric.Int64Counter, error) {
-	return a.Meter.Int64Counter(n)
+	return a.Int64Counter(n)
 }
 
 func (a meterAdapter) Gauge(n string) (metric.Int64Gauge, error) {
-	return a.Meter.Int64Gauge(n)
+	return a.Int64Gauge(n)
 }
 
 func (a meterAdapter) Histogram(n string) (metric.Int64Histogram, error) {
-	return a.Meter.Int64Histogram(n)
+	return a.Int64Histogram(n)
 }
 
 // Tracer abstrai a criação de spans (assinatura idêntica a trace.Tracer.Start).
