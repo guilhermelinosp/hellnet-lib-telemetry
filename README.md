@@ -10,6 +10,56 @@ also available locally for inspection (no collector required).
 
 ---
 
+## 🧒 Entenda com 15 anos
+
+### A analogia
+
+Um app **sem telemetria** é pilotar um avião com o **para-brisa pintado**: o avião voa
+normalmente, mas quando algo despenca você não enxerga nada lá fora.
+
+Telemetria é a **torre de controle** + um painelzinho de instrumentos na sua frente:
+
+- **Logs** — o diário de bordo: "aconteceu X às 10h".
+- **Metrics** — o velocímetro: quantas req/s, quanta memória em uso.
+- **Traces** — o GPS do pedido: passou pela cozinha → caixa → entrega, e em que etapa demorou?
+- **Health endpoints** — o "tá tudo bem?" periódico: `/live`, `/ready`, `/health`.
+
+### O problema que resolve
+
+- **Sem telemetria:** dá ruim às **2h da manhã** e ninguém tem pistas — só se sabe que "não funciona".
+- **Com telemetria:** você vê exatamente **qual etapa quebrou**, o que ela registrou antes de cair
+  e há quanto tempo aquilo vinha piorando.
+
+E ligar isso aqui não é um projeto: é **uma linha de setup** (`telemetry.New`) em vez de
+plugar o OpenTelemetry peça por peça na mão.
+
+### Mini-dicionário
+
+| Termo | Explicação com 15 anos |
+|---|---|
+| **log** | Linha escrita no diário de bordo: "aconteceu X às 10h" |
+| **métrica** | Número do velocímetro: req/s, memória, duração — somado ao longo do tempo |
+| **trace/span** | Trecho cronometrado da viagem; um **span filho** é a etapa dentro da etapa |
+| **OTLP/collector** | A central que recebe os relatórios de todas as torres |
+| **middleware** | O porteiro que anota quem chegou antes de qualquer coisa acontecer |
+| **healthcheck** | A pergunta "tá tudo bem?", respondida por `/live`, `/ready` e `/health` |
+| **baseCtx** | O mapa-múndi da aplicação: você entrega o contexto UMA vez no `New` e todos os relatórios herdam dele |
+
+### Primeiras linhas
+
+```go
+// contexto entregue UMA vez — todos os relatórios herdam dele
+ctx := context.Background()
+
+tel, err := telemetry.New(ctx) // valida HELLNET_* obrigatórias
+defer func() { _ = tel.Shutdown() }() // desliga na ordem certa, sem perder relatórios
+mux.Handle("/", telemetry.Middleware(tel, meuHandler)) // o porteiro anota cada request
+```
+
+As próximas seções mostram o detalhe técnico completo de cada peça.
+
+---
+
 ## Quick start
 
 ```go
@@ -122,6 +172,8 @@ opts := telemetry.Options{
 
 ## Health endpoints
 
+> 🧒 **Entenda com 15 anos:** perguntar "tudo bem?" a cada instante — `/live`, `/ready` e `/health` respondem.
+
 | Endpoint | Handler | Purpose |
 |---|---|---|
 | `GET /live` | `tel.Live()` | Liveness probe — always 200 |
@@ -164,6 +216,8 @@ Métricas produzidas: `healthcheck_status{check,status}`,
 
 ## Tracing
 
+> 🧒 **Entenda com 15 anos:** GPS etapa-por-etapa — dá pra ver por onde o pedido passou e onde demorou.
+
 Fluxo padrão (ctx-free — span derivado do contexto-base, repassado ao callback):
 
 ```go
@@ -195,6 +249,8 @@ span.SetAttributes(attribute.Int("items.count", 5))
 ---
 
 ## Metrics
+
+> 🧒 **Entenda com 15 anos:** velocímetro/painel do carro — quanto trafega por segundo, quanta memória gasta.
 
 A lib já coleta dezenas de métricas **automaticamente** (sem código seu). Há
 três formas de métricas:
@@ -378,6 +434,8 @@ No OpenTelemetry percentis **não são emitidos** — o que sai é um histograma
 
 ## Logging
 
+> 🧒 **Entenda com 15 anos:** diário de bordo — "às 10h03 aconteceu X", registrado na hora.
+
 Usa `log/slog` com saída dupla: **stdout (JSON)** + **OTLP → Loki**.
 
 ```go
@@ -455,6 +513,8 @@ resp, err := client.Get("https://api.external/")
 
 ## Workers (background jobs, queues, cron)
 
+> 🧒 **Entenda com 15 anos:** robô que trabalha enquanto você dorme — e cada turno dele vem com crachá rastreado.
+
 `Worker` é a versão "sem HTTP" do `Middleware`: qualquer unidade de trabalho ganha
 observabilidade automática (trace + métricas + log) sem boilerplate. O erro de
 `fn` é repassado, então o caller decide retry/backoff.
@@ -512,6 +572,8 @@ func main() {
 ---
 
 ## Shutdown
+
+> 🧒 **Entenda com 15 anos:** desligar na ordem certa pra não perder relatórios.
 
 Sempre chame para flush dos buffers:
 
