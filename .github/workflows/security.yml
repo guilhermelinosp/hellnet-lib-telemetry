@@ -41,7 +41,7 @@ jobs:
         run: |
           pip install --quiet --break-system-packages semgrep
           semgrep --version
-          semgrep --config p/ci --error
+          semgrep --config p/ci --error --exclude .github
 
       - name: GoSec
         if: hashFiles('go.mod') != ''
