@@ -38,10 +38,10 @@ jobs:
         run: go vet ./...
 
       - name: Semgrep
-        uses: semgrep/semgrep@v1
-        with:
-          # public community CI ruleset (no SEMGREP_APP_TOKEN required)
-          args: --config p/ci --error
+        run: |
+          pip install --quiet --break-system-packages semgrep
+          semgrep --version
+          semgrep --config p/ci --error --exclude .github
 
       - name: GoSec
         if: hashFiles('go.mod') != ''
