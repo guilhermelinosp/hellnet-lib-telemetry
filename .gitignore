@@ -42,3 +42,4 @@ go.work.sum
 
 # Examples (demo only — local, not shipped / not committed)
 example/
+.zed/
