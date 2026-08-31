@@ -20,16 +20,24 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// ───────────────────────────── SLO ─────────────────────────────
+// loggingResponseWriter wraps http.ResponseWriter to capture status code and
+// response size for metrics/logging.
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+	size       int
+}
 
-// ErrInvalidTarget indica target de SLO fora de (0,1].
-var ErrInvalidTarget = errors.New("telemetry: target de SLO deve estar em (0,1]")
+func (lrw *loggingResponseWriter) WriteHeader(code int) {
+	lrw.statusCode = code
+	lrw.ResponseWriter.WriteHeader(code)
+}
 
-// ErrNoEvents indica totalEvents <= 0 (janela sem dados).
-var ErrNoEvents = errors.New("telemetry: totalEvents deve ser > 0")
-
-// ErrBadCounts indica goodEvents inconsistente com totalEvents.
-var ErrBadCounts = errors.New("telemetry: goodEvents deve estar em [0,totalEvents]")
+func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
+	n, err := lrw.ResponseWriter.Write(b)
+	lrw.size += n
+	return n, err
+}
 
 // ErrorBudget resume a conformidade de SLO de uma janela.
 type ErrorBudget struct {
@@ -44,6 +52,30 @@ type ErrorBudget struct {
 	// Breached é true quando Observed < Target (gatilho de alerta SRE).
 	Breached bool
 }
+
+// HealthStatus represents the health check result.
+type HealthStatus struct {
+	Status string        `json:"status"`
+	Checks []CheckResult `json:"checks,omitempty"`
+}
+
+// CheckResult holds an individual health check outcome.
+type CheckResult struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// ───────────────────────────── SLO ─────────────────────────────
+
+// ErrInvalidTarget indica target de SLO fora de (0,1].
+var ErrInvalidTarget = errors.New("telemetry: target de SLO deve estar em (0,1]")
+
+// ErrNoEvents indica totalEvents <= 0 (janela sem dados).
+var ErrNoEvents = errors.New("telemetry: totalEvents deve ser > 0")
+
+// ErrBadCounts indica goodEvents inconsistente com totalEvents.
+var ErrBadCounts = errors.New("telemetry: goodEvents deve estar em [0,totalEvents]")
 
 // ComputeErrorBudget calcula o error budget dado um SLO alvo (razão de sucesso
 // em (0,1]) e as contagens de eventos de uma janela. É pura e determinística
@@ -87,19 +119,6 @@ func ComputeErrorBudget(target float64, goodEvents, totalEvents int) (ErrorBudge
 }
 
 // ──────────────────────────── Health ────────────────────────────
-
-// HealthStatus represents the health check result.
-type HealthStatus struct {
-	Status string        `json:"status"`
-	Checks []CheckResult `json:"checks,omitempty"`
-}
-
-// CheckResult holds an individual health check outcome.
-type CheckResult struct {
-	Name   string `json:"name"`
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
-}
 
 // Live returns a liveness handler (self-check only).
 func (t *Telemetry) Live() http.Handler {
@@ -428,23 +447,6 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 	})
 }
 
-type loggingResponseWriter struct {
-	http.ResponseWriter
-	statusCode int
-	size       int
-}
-
-func (lrw *loggingResponseWriter) WriteHeader(code int) {
-	lrw.statusCode = code
-	lrw.ResponseWriter.WriteHeader(code)
-}
-
-func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
-	n, err := lrw.ResponseWriter.Write(b)
-	lrw.size += n
-	return n, err
-}
-
 // httpResponseSizeBoundaries (bytes) para o histograma de tamanho de resposta.
 var httpResponseSizeBoundaries = []float64{
 	100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000, 5000000,
@@ -469,9 +471,10 @@ var latencyBucketBoundaries = []float64{
 // job agendado (cron) ou task em background ganha observabilidade sem escrever
 // boilerplate.
 //
-// O contexto é passado UMA vez em New (baseCtx): o span do job deriva dele
-// (raiz(baseCtx) → filhos) e o ctx derivado é repassado a fn para continuação
-// da linhagem por código otel-instrumentado mais a fundo.
+// A lib mantém um contexto-base (baseCtx, derivado de context.Background()):
+// o span do job deriva dele (raiz(baseCtx) → filhos) e o ctx derivado é
+// repassado a fn para continuação da linhagem por código otel-instrumentado
+// mais a fundo.
 //
 // Para cada execução o Worker produz, transparente para o caller:
 //   - span de trace (nome = job), com status de erro quando fn falha;
@@ -488,11 +491,7 @@ var latencyBucketBoundaries = []float64{
 // retry/backoff. extra permite atributos adicionais (fila, partition, tenant).
 func (t *Telemetry) Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error {
 	jobsTotal, _ := t.Meter.Counter("worker_jobs_total")
-	jobDur, _ := t.Meter.Float64Histogram("worker_job_duration_seconds",
-		metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...),
-		metric.WithUnit("s"),
-		metric.WithDescription("Duração de execução de jobs/workers em segundos"),
-	)
+	jobDur, _ := t.Meter.Float64Histogram("worker_job_duration_seconds", metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...), metric.WithUnit("s"), metric.WithDescription("Duração de execução de jobs/workers em segundos"))
 	// UpDownCounter é o instrumento correto para concorrência (inflight):
 	// permite Add/Sub de delta, diferente de Gauge (Record de valor absoluto).
 	inflight, _ := t.Meter.Int64UpDownCounter("worker_jobs_inflight")
@@ -503,8 +502,8 @@ func (t *Telemetry) Worker(job string, fn func(ctx context.Context) error, extra
 	}
 
 	if inflight != nil {
-		inflight.Add(t.baseContext(), 1, metric.WithAttributes(baseAttrs...))
-		defer inflight.Add(t.baseContext(), -1, metric.WithAttributes(baseAttrs...))
+		inflight.Add(t.baseCtx, 1, metric.WithAttributes(baseAttrs...))
+		defer inflight.Add(t.baseCtx, -1, metric.WithAttributes(baseAttrs...))
 	}
 
 	start := time.Now()
@@ -526,18 +525,11 @@ func (t *Telemetry) Worker(job string, fn func(ctx context.Context) error, extra
 	}
 
 	if err != nil {
-		t.logIn(spanCtx, slog.LevelError, "worker job failed",
-			slog.String("job", job),
-			slog.Duration("duration", dur),
-			slog.String("error", err.Error()),
-		)
+		t.logIn(spanCtx, slog.LevelError, "worker job failed", slog.String("job", job), slog.Duration("duration", dur), slog.String("error", err.Error()))
 		return err
 	}
 
-	t.logIn(spanCtx, slog.LevelInfo, "worker job completed",
-		slog.String("job", job),
-		slog.Duration("duration", dur),
-	)
+	t.logIn(spanCtx, slog.LevelInfo, "worker job completed", slog.String("job", job), slog.Duration("duration", dur))
 	return nil
 }
 
@@ -545,6 +537,23 @@ func (t *Telemetry) Worker(job string, fn func(ctx context.Context) error, extra
 // readOpenFds e readThreads leem /proc (Linux). Em outras plataformas retornam
 // erro e a métrica relacionada simplesmente não é emitida — sem build tags
 // separados, mantendo o número de arquivos baixo.
+
+// procStatFields retorna os campos (separados por espaço) de /proc/self/stat
+// que vêm APÓS o comm (a parte após o último ")"). Linux-only: retorna erro em
+// outras plataformas, permitindo que as métricas dependentes dele simplesmente
+// não sejam emitidas (sem build tags separados — DRY/KISS).
+func procStatFields() ([]string, error) {
+	data, err := os.ReadFile("/proc/self/stat")
+	if err != nil {
+		return nil, err
+	}
+	s := string(data)
+	idx := strings.LastIndex(s, ")")
+	if idx < 0 {
+		return nil, os.ErrInvalid
+	}
+	return strings.Fields(s[idx+1:]), nil
+}
 
 func readOpenFds() (int64, error) {
 	entries, err := os.ReadDir("/proc/self/fd")
@@ -554,25 +563,17 @@ func readOpenFds() (int64, error) {
 	return int64(len(entries)), nil
 }
 
+// readThreads lê o número de OS threads (num_threads, 18º campo após o comm)
+// de /proc/self/stat. Em não-Linux retorna erro e a métrica não é emitida.
 func readThreads() (int64, error) {
-	data, err := os.ReadFile("/proc/self/stat")
+	fields, err := procStatFields()
 	if err != nil {
 		return 0, err
 	}
-	s := string(data)
-	idx := strings.LastIndex(s, ")")
-	if idx < 0 {
+	if len(fields) < 18 {
 		return 0, os.ErrInvalid
 	}
-	fields := strings.Fields(s[idx+1:])
-	if len(fields) < 18 { // num_threads é o 18º campo após o comm
-		return 0, os.ErrInvalid
-	}
-	n, err := strconv.ParseInt(fields[17], 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	return n, nil
+	return strconv.ParseInt(fields[17], 10, 64)
 }
 
 // ─────────────────── HTTP client (outbound) ───────────────────

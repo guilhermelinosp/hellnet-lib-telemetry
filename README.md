@@ -42,14 +42,12 @@ Telemetria é a **torre de controle** + um painelzinho de instrumentos na sua fr
 | **OTLP/collector** | A central que recebe os relatórios de todas as torres |
 | **middleware** | O porteiro que anota quem chegou antes de qualquer coisa acontecer |
 | **healthcheck** | A pergunta "tá tudo bem?", respondida por `/live`, `/ready` e `/health` |
-| **baseCtx** | O mapa-múndi da aplicação: você entrega o contexto UMA vez no `New` e todos os relatórios herdam dele |
+| **baseCtx** | O mapa-múndi da aplicação: raiz (`context.Background()`) mantida internamente pela lib; todos os relatórios herdam dele |
 
 ### Primeiras linhas
 
 ```go
-ctx := context.Background() // contexto entregue UMA vez — todos os relatórios herdam dele
-
-tel, err := telemetry.New(ctx) // valida HELLNET_* obrigatórias
+tel, err := telemetry.New() // sem parâmetros: lê HELLNET_* e usa context.Background() como base
 defer func() { _ = tel.Shutdown() }() // desliga na ordem certa, sem perder relatórios
 mux.Handle("/", telemetry.Middleware(tel, meuHandler)) // o porteiro anota cada request
 ```
@@ -64,18 +62,15 @@ As próximas seções mostram o detalhe técnico completo de cada peça.
 package main
 
 import (
-	"context"
 	"net/http"
 
 	"github.com/guilhermelinosp/hellnet-lib-telemetry/telemetry"
 )
 
 func main() {
-	// Contexto da aplicação passado UMA vez na construção — tudo que a lib
-	// executar (spans, workers, health checks, logs) herda dele.
-	ctx := context.Background()
-
-	tel, err := telemetry.New(ctx) // lê env HELLNET_TELEMETRY_* / HELLNET_*
+	// Sem parâmetros: a lib lê HELLNET_TELEMETRY_* / HELLNET_* do ambiente e
+	// usa context.Background() como contexto-base (baseCtx) internamente.
+	tel, err := telemetry.New()
 	if err != nil {
 		panic(err)
 	}
@@ -102,45 +97,33 @@ A lib aceita o prefixo **`HELLNET_TELEMETRY_*`** (padrão hellnet) ou o antigo
 |---|---|---|
 | `HELLNET_TELEMETRY_SERVICE` | `order-api` | Service identifier (required) |
 | `HELLNET_TELEMETRY_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (required). **A porta deve vir junto do endpoint** (ex.: `:4318` ou `:443`); não há variável de porta separada. Se a porta for omitida, é inferida do scheme (443 p/ https, 80 p/ http) |
-| `HELLNET_TELEMETRY_ENVIRONMENT` | `Development` | Ambiente (**opcional**); controla `.env` loading. Ausente = tratado como dev |
+| `HELLNET_TELEMETRY_ENVIRONMENT` | `Development` | Ambiente (**opcional**); usado como atributo de resource (`deployment.environment`) |
 
-> Apenas `SERVICE` e `ENDPOINT` são obrigatórios. A porta **não** é configurável via env separada — ela vive no `ENDPOINT`.
-> Arquivo `.env` explícito: `HELLNET_TELEMETRY_ENV_FILE` (ou `HELLNET_ENV_FILE`).
+> Apenas `SERVICE` e `ENDPOINT` são obrigatórios. A porta **não** é configurável via env separada — ela vive no `ENDPOINT`. Não há carregamento de arquivo `.env`.
+
+> **Endpoint vazio**: se `HELLNET_TELEMETRY_ENDPOINT` (ou `HELLNET_ENDPOINT`) não
+> for definido, o export OTLP é desligado (logs ficam só em stdout; métricas só
+> em `/metrics` Prometheus; traces não exportam) — em vez de tentar exportar para
+> uma URL inválida.`
 
 ---
 
 ## Configuration
 
-### Default (from env)
+### De ambiente (sem parâmetros)
+
+`New()` **não recebe parâmetros** — a lib lê as envs
+`HELLNET_TELEMETRY_*` / `HELLNET_*` e usa `context.Background()` como
+contexto-base (`baseCtx`):
 
 ```go
-ctx := context.Background()
-
-// env-first (sem Options): carrega .env + HELLNET_TELEMETRY_* / HELLNET_*
-tel, _ := telemetry.New(ctx)
+tel, _ := telemetry.New() // lê HELLNET_TELEMETRY_* / HELLNET_*
 ```
 
-### Custom options
+### Application context (baseCtx)
 
-```go
-opts := telemetry.Options{
-	ServiceName:   "my-service",
-	OTLPEndpoint:  "http://collector:4318",
-	LogLevel:      slog.LevelDebug,
-	Enabled:       true, // liga trace + metrics + logs de uma vez
-	ResourceAttrs: []attribute.KeyValue{
-		attribute.String("deployment.region", "us-east-1"),
-	},
-	PrometheusExporter: true, // expõe /metrics (default true)
-}
-tel, _ := telemetry.New(ctx, opts)
-```
-
-### Application context (passado UMA vez)
-
-O contexto da aplicação entra **somente no `New`/`MustNew`** e fica retido
-internamente (`baseCtx`). Nenhum método da lib recebe ctx de app. É o único
-lugar para anexar baggage/propagators OTel de longa duração.
+A lib mantém um contexto-base (`baseCtx`) internamente, derivado de
+`context.Background()` na construção. Nenhum método da lib recebe ctx de app.
 
 Consequência de correlação: traces de aplicação formam **uma única linhagem**
 com raiz no `baseCtx` (`WithSpan`/`Worker` criam filhos sob ele; o ctx derivado
@@ -148,23 +131,17 @@ com raiz no `baseCtx` (`WithSpan`/`Worker` criam filhos sob ele; o ctx derivado
 Traces request-scoped extraídos pelo **Middleware** permanecem independentes —
 origem são os requests inbound (comportamento server-side correto).
 
-### Tudo ligado ou tudo desligado
+### Sempre ligado
 
-`Enabled` controla os três sinais juntos. Não há toggle individual. Para
-desabilitar tudo (ex.: testes unitários), use `Enabled: false`.
+Os três sinais (trace + metrics + logs) estão **sempre ligados** por padrão.
+Não há toggle para desligá-los:
 
 ```go
-opts := telemetry.Options{
-	ServiceName:  "my-service",
-	OTLPEndpoint: "http://collector:4318",
-	Enabled:      false, // sem trace/metrics/logs
-}
+tel, _ := telemetry.New()
 ```
 
-> **Globais (opt-in):** `Options.RegisterGlobals` (default `false`) controla se os
-> providers são registrados no estado global do otel/slog. Deixe `false` e use
-> `tel.*` / `telemetry.Client` para DI/mock limpa; `true` reproduz o comportamento
-> legado.
+Os providers são registrados no estado global do otel/slog automaticamente
+(runtime metrics e exporter Prometheus `/metrics` inclusos).
 
 ---
 
@@ -258,7 +235,7 @@ três formas de métricas:
 2. **Instrumentação de cliente HTTP** (`tel.HTTPClient`) — automática ao usar o
    `http.Client` retornado.
 3. **Customizadas** — crie contadores/histogramas/gauges via `tel.Meter` (ou
-   `tel.Metrics()`).
+   `tel.Metric()`).
 
 ### Custom metrics
 
@@ -292,9 +269,9 @@ defer func(start time.Time) { hist.Record(ctx, time.Since(start).Milliseconds())
 
 ### Prometheus `/metrics` endpoint
 
-`PrometheusExporter` (default `true`) anexa um exporter Prometheus à **mesma**
-`MeterProvider` usada pelo OTLP. Exponha `tel.MetricsHandler()` (um
-`http.Handler`) em qualquer rota para inspecionar everything localmente:
+O exporter Prometheus vem **sempre ligado** (anexado à **mesma** `MeterProvider`
+usada pelo OTLP). Exponha `tel.MetricsHandler()` (um `http.Handler`) em qualquer
+rota para inspecionar everything localmente:
 
 ```go
 mux.Handle("GET /metrics", tel.MetricsHandler())
@@ -379,8 +356,6 @@ Conjunto detalhado (`runtime/metrics`, nível prometheus-net):
 > ⚠️ `process_cpu_usage_percent`, `process_cpu_usage_ratio`, `process_open_fds` e
 > `process_threads` dependem de `/proc` e **só são emitidos em Linux**. Em macOS
 > (dev) elas ficam ausentes; aparecem normalmente no deploy Linux.
-
-Desligue com `opts.RuntimeMetrics = false`.
 
 ### Exemplo de queries (PromQL)
 
@@ -543,8 +518,8 @@ err := tel.WithSpan("sync-upstream", func(ctx context.Context) error {
 | `WithRetryBackoff(base)` | `100ms` | Delay inicial entre tentativas (dobra até 5s, jitter ±20%) |
 | `WithExtraTransport(rt)` | clone de `DefaultTransport` | Transporte interno customizado (proxy/TLS/dial) |
 
-> A propagação W3C é sempre ligada na factory (independe de
-> `RegisterGlobals`) — apps com DI/testes continuam propagando o trace.
+> A propagação W3C é sempre ligada na factory — apps com DI/testes continuam
+> propagando o trace.
 
 ---
 
@@ -587,27 +562,6 @@ Métricas: `db_sql_*` (veja catálogo acima), particionadas por `db=name`.
 
 ---
 
-## Development mode (.env loading)
-
-Carrega `.env` **somente em Development**:
-
-```go
-func main() {
-	telemetry.Loading() // carrega .env (dev/unset) + valida HELLNET_*; pula em Production/Staging
-
-	tel, _ := telemetry.New(context.Background())
-}
-```
-
-- Verifica `HELLNET_ENVIRONMENT` (obrigatório)
-- Só carrega se valor for `Development`/`development`
-- Usa `HELLNET_ENV_FILE` ou o `.env` do **mesmo diretório do executável**
-  (onde `main` reside) — resolve via `os.Executable()`. Se não houver `.env`
-  ao lado do binário, faz fallback para o diretório corrente (`os.Getwd()`).
-- **Não sobrescreve** env vars existentes
-
----
-
 ## Shutdown
 
 > 🧒 **Entenda com 15 anos:** desligar na ordem certa pra não perder relatórios.
@@ -631,11 +585,11 @@ var c telemetry.Client = tel
 
 // Metrics — tel.Meter expõe Counter/Gauge/Histogram (int64, nome sem tipo)
 // + toda a superfície crua de metric.Meter (Float64*, Observable*, RegisterCallback).
-counter, _ := c.Metrics().Counter("req_total")
+counter, _ := c.Metric().Counter("req_total")
 counter.Add(ctx, 1)
-c.Metrics().Gauge("queue").Record(ctx, int64(q))
-c.Metrics().Histogram("latency").Record(ctx, d.Milliseconds())
-c.Metrics().Float64Histogram("latency_s").Record(ctx, d.Seconds())
+c.Metric().Gauge("queue").Record(ctx, int64(q))
+c.Metric().Histogram("latency").Record(ctx, d.Milliseconds())
+c.Metric().Float64Histogram("latency_s").Record(ctx, d.Seconds())
 
 // também direto no tel (sem passar pelo Client):
 tel.Meter.Counter("hellnet_smoke_ops_total")
@@ -654,13 +608,45 @@ tracing estão desligados, os acessores retornam implementações noop (nunca `n
 
 ---
 
+## Profiling
+
+Dois modos, ambos automáticos:
+
+1. **Push → Pyroscope** (contínuo): inicia sozinho no `New()` quando há
+   `HELLNET_TELEMETRY_ENDPOINT`. O endpoint é **derivado do mesmo endpoint OTLP**:
+   - In-cluster (`http://alloy:4318`) → `http://alloy:9999` (porta do `pyroscope.receive_http`)
+   - Gateway (`https://alloy.hellnet.com.br`) → `https://alloy.hellnet.com.br/ingest`
+   - Override: `HELLNET_TELEMETRY_PROFILE_ENDPOINT` (quando o Alloy não usa a porta 9999)
+   Habilita sempre CPU, heap (alloc/inuse), goroutines, **block** e **mutex**.
+   Para no `Shutdown()`.
+
+2. **Pull → pprof** (sob demanda): monte os handlers no mux:
+   ```go
+   tel.ProfilesRegister(mux) // /debug/pprof/ (cpu, heap, goroutine, block, mutex, trace)
+   ```
+   ⚠️ **Segurança**: `/debug/pprof/*` expõe heap dumps, stack traces e profiles sem
+   autenticação. **NÃO** exponha publicamente — restringa por rede/IP ou autenticação.
+
+---
+
+## Troubleshooting
+
+| Sintoma | Causa provável | Solução |
+|---|---|---|
+| Nada aparece no Grafana, mas logs vão para stdout | **`.env` não carregado** → lib em modo no-op | O `New()` **deve** chamar `environments.LoadDotEnv()`. Confirme no startup: `telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio` |
+| `telemetry iniciado ... Alloy inacessível no startup` | Endpoint não responde (rede/VPN/port-forward) | Valide: `curl -v https://alloy.hellnet.com.br/v1/traces`; use port-forward ou HTTPRoute acessível |
+| Traces/Tempo OK, mas metrics não no Prometheus | Prometheus sem `--web.enable-remote-write-receiver` | Adicione a flag ao args do Prometheus |
+| Profiles não no Pyroscope | Endpoint derivado errado (Alloy com porta ≠ 9999) | Sete `HELLNET_TELEMETRY_PROFILE_ENDPOINT` |
+| `405` ao testar OTLP com curl GET | Normal — OTLP HTTP usa **POST** | Use `curl -X POST` |
+
+---
+
 ## API reference
 
 | Function | Description |
 |---|---|
-| `telemetry.New(ctx, opts...)` | Setup all-in-one; **ctx da app passado UMA vez** (baseCtx interno) |
-| `telemetry.MustNew(ctx, opts...)` | Como `New`, mas entra em pânico em erro |
-| `telemetry.Loading()` | Carrega `.env` (dev) + valida envs |
+| `telemetry.New()` | Setup all-in-one (sem parâmetros): lê `HELLNET_*` e usa `context.Background()` como baseCtx |
+| `telemetry.MustNew()` | Como `New`, mas entra em pânico em erro |
 | `telemetry.Middleware(tel, handler)` | HTTP tracing + request metrics + logging (request-scoped) |
 | `tel.Live()` / `tel.Ready()` / `tel.Health()` | Health probes (`http.Handler`) |
 | `tel.HealthRegister(name, fn)` | Custom health check — ctx **fornecido pela lib** |
@@ -674,9 +660,6 @@ tracing estão desligados, os acessores retornam implementações noop (nunca `n
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
 | `tel.Shutdown()` | Flush OTLP + Prometheus |
 | `opts.RedactSensitive` / `opts.RedactKeys` | Mascara PII nos logs |
-| `opts.RuntimeMetrics` | Liga/desliga runtime metrics (default ligado) |
-| `opts.PrometheusExporter` | Liga `/metrics` (default `true`) |
-| `opts.RegisterGlobals` | Registra providers no estado global otel/slog |
 
 ---
 
