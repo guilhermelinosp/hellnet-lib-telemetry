@@ -77,6 +77,34 @@ func defaultHTTPClientConfig() httpClientConfig {
 // HTTPOption ajusta uma opção da factory HTTPClient.
 type HTTPOption func(*httpClientConfig)
 
+// attemptResult carrega o resultado de UMA tentativa pelo pipeline
+// retry/métricas/log. O cancel fica retido porque o corpo da resposta segue
+// vinculado ao ctx da tentativa após RoundTrip retornar (streaming); ele é
+// invocado ao sobrepor a tentativa e em qualquer falha final.
+type attemptResult struct {
+	resp     *http.Response
+	err      error
+	status   int                // 0 quando err != nil
+	elapsed  time.Duration      // duração da passagem pelo transporte
+	ctx      context.Context    // ctx da tentativa (linhagem p/ métricas)
+	cancel   context.CancelFunc // cancel do deadline desta tentativa
+	attempts int                // nº total de tentativas executadas (preenchido no fim)
+	fatal    bool               // erro que NÃO pode ser retentado (ex.: falha ao reconstruir corpo)
+}
+
+// clientRetryTransport envelopa o transporte instrumentado (otelhttp) com
+// retry/backoff de métodos idempotentes, métricas por tentativa e log de
+// falha final. Implementa http.RoundTripper (uso interno da factory HTTPClient).
+type clientRetryTransport struct {
+	next http.RoundTripper
+	cfg  httpClientConfig
+	m    *clientMetrics
+	tel  *Telemetry
+}
+
+// Compile-time: o transporte do client é um RoundTripper válido.
+var _ http.RoundTripper = (*clientRetryTransport)(nil)
+
 // WithBaseTimeout define o timeout POR TENTATIVA (default 10s). O prazo cobre
 // a tentativa inteira — conexão, envio, resposta e leitura do body — portanto
 // use valores maiores para downloads/streaming longos.
@@ -160,9 +188,9 @@ func (t *Telemetry) HTTPClient(opts ...HTTPOption) *http.Client {
 	}
 
 	// Propagação SEMPRE explícita (W3C TraceContext + Baggage): o propagador
-	// global default do otel é NOOP — sem esta opção, apps com
-	// RegisterGlobals=false fariam chamadas outbound SEM traceparent (o span
-	// até nasceria, mas o header não seria injetado no request).
+	// global default do otel é NOOP — sem esta opção, chamadas outbound seriam
+	// SEM traceparent (o span até nasceria, mas o header não seria injetado no
+	// request).
 	httpOpts := []otelhttp.Option{
 		otelhttp.WithPropagators(propagation.NewCompositeTextMapPropagator(
 			propagation.TraceContext{},
@@ -265,34 +293,6 @@ func retryDelay(base time.Duration, attempt int) time.Duration {
 	}
 	return jittered
 }
-
-// attemptResult carrega o resultado de UMA tentativa pelo pipeline
-// retry/métricas/log. O cancel fica retido porque o corpo da resposta segue
-// vinculado ao ctx da tentativa após RoundTrip retornar (streaming); ele é
-// invocado ao sobrepor a tentativa e em qualquer falha final.
-type attemptResult struct {
-	resp     *http.Response
-	err      error
-	status   int                // 0 quando err != nil
-	elapsed  time.Duration      // duração da passagem pelo transporte
-	ctx      context.Context    // ctx da tentativa (linhagem p/ métricas)
-	cancel   context.CancelFunc // cancel do deadline desta tentativa
-	attempts int                // nº total de tentativas executadas (preenchido no fim)
-	fatal    bool               // erro que NÃO pode ser retentado (ex.: falha ao reconstruir corpo)
-}
-
-// clientRetryTransport envelopa o transporte instrumentado (otelhttp) com
-// retry/backoff de métodos idempotentes, métricas por tentativa e log de
-// falha final. Implementa http.RoundTripper (uso interno da factory HTTPClient).
-type clientRetryTransport struct {
-	next http.RoundTripper
-	cfg  httpClientConfig
-	m    *clientMetrics
-	tel  *Telemetry
-}
-
-// Compile-time: o transporte do client é um RoundTripper válido.
-var _ http.RoundTripper = (*clientRetryTransport)(nil)
 
 // RoundTrip executa a cadeia de tentativas (métodos idempotentes) ou uma
 // única passagem (POST/PATCH/etc. ou corpo não-retornável), gravando métricas
