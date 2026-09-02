@@ -1,6 +1,6 @@
 module github.com/guilhermelinosp/hellnet-lib-telemetry
 
-go 1.26
+go 1.27.0
 
 require (
 	github.com/grafana/pyroscope-go v1.4.2
