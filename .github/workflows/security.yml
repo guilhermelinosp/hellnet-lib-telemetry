@@ -37,7 +37,6 @@ jobs:
         if: hashFiles('go.mod') != ''
         run: go vet ./...
 
-
       - name: GoSec
         if: hashFiles('go.mod') != ''
         uses: securego/gosec@master
