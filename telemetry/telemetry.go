@@ -199,10 +199,8 @@ func New() (*Telemetry, error) {
 		tel.Logger.Warn("telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio, nada será exportado")
 	} else {
 		tel.Logger.Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "profiling", "auto", "env", o.Environment)
-		// Health check de conectividade com o Alloy, executado em /ready e /health.
-		tel.HealthRegister("otlp-collector", func(c context.Context) error {
-			return checkOTLPReachable(c, o.OTLPEndpoint)
-		})
+		// Conectividade do Alloy já é coberta pelo check "otlp-collector"
+		// embutido em runChecks (ver instrumentation.go) — não registrar duplicado.
 		if err := checkOTLPReachable(ctx, o.OTLPEndpoint); err != nil {
 			tel.Logger.Warn("telemetry: Alloy inacessível no startup (dados podem não chegar)",
 				"endpoint", o.OTLPEndpoint, "error", err)
