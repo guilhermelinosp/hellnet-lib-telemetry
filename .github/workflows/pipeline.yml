@@ -45,6 +45,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: guilhermelinosp/templates/.github/workflows/lib-quality.yml@e7d093b460c1e25f16121d509eefcbb597612c95 # main
+    uses: guilhermelinosp/templates/.github/workflows/lib-quality.yml@af2bcbe5d72882b5ab9145a02620d229dd14587f # main
     with:
       go-version-file: go.mod
