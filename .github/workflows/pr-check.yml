@@ -11,19 +11,19 @@ permissions:
 
 jobs:
   lint:
-    uses: guilhermelinosp/templates/.github/workflows/shellcheck.yml@af2bcbe5d72882b5ab9145a02620d229dd14587f # main
+    uses: guilhermelinosp/templates/.github/workflows/shellcheck.yml@9a3e1c923824fbd71b5dad45976c6e66ba2a1a01 # main
 
   merge-check:
-    uses: guilhermelinosp/templates/.github/workflows/merge-check.yml@af2bcbe5d72882b5ab9145a02620d229dd14587f # main
+    uses: guilhermelinosp/templates/.github/workflows/merge-check.yml@9a3e1c923824fbd71b5dad45976c6e66ba2a1a01 # main
 
   gitleaks:
-    uses: guilhermelinosp/templates/.github/workflows/gitleaks.yml@af2bcbe5d72882b5ab9145a02620d229dd14587f # main
+    uses: guilhermelinosp/templates/.github/workflows/gitleaks.yml@9a3e1c923824fbd71b5dad45976c6e66ba2a1a01 # main
 
   labeler:
-    uses: guilhermelinosp/templates/.github/workflows/labeler.yml@af2bcbe5d72882b5ab9145a02620d229dd14587f # main
+    uses: guilhermelinosp/templates/.github/workflows/labeler.yml@9a3e1c923824fbd71b5dad45976c6e66ba2a1a01 # main
 
   quality:
     name: quality
-    uses: guilhermelinosp/templates/.github/workflows/lib-quality.yml@af2bcbe5d72882b5ab9145a02620d229dd14587f # main
+    uses: guilhermelinosp/templates/.github/workflows/lib-quality.yml@9a3e1c923824fbd71b5dad45976c6e66ba2a1a01 # main
     with:
       go-version-file: go.mod
