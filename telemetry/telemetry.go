@@ -97,7 +97,10 @@ type Options struct {
 //	c.Meter.Counter("req_total")        // int64 (atalho)
 //	c.Meter.Float64Histogram("lat_s")   // float (superfície crua)
 //	c.WithSpan("op", func(ctx context.Context) error { ... })
-//	c.Log().Error("boom", "err", err)
+//	c.Error("boom", "err", err)         // log direto
+//	c.Warn("slow", "latency", dur)      // log direto
+//	c.Info("started", "port", port)     // log direto
+//	c.Debug("debug", "detail", val)     // log direto
 type Client interface {
 	Log() Logger
 	Trace() Tracer
@@ -105,6 +108,11 @@ type Client interface {
 	Shutdown() error
 	WithSpan(name string, fn func(ctx context.Context) error) error
 	Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
+	// Direct logging convenience methods (delegam para Log().*())
+	Error(msg string, args ...any)
+	Warn(msg string, args ...any)
+	Info(msg string, args ...any)
+	Debug(msg string, args ...any)
 }
 
 // Compile-time: *Telemetry satisfaz Client.
