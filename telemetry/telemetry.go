@@ -113,6 +113,18 @@ type Client interface {
 	Warn(msg string, args ...any)
 	Info(msg string, args ...any)
 	Debug(msg string, args ...any)
+
+	// Counter incrementa um contador int64 (atalho: cria/obtém + Add em uma chamada).
+	Counter(ctx context.Context, name string, value int64) error
+
+	// Gauge grava um valor em um gauge int64 (atalho: cria/obtém + Record em uma chamada).
+	Gauge(ctx context.Context, name string, value int64) error
+
+	// Histogram grava um valor em um histograma int64 (atalho: cria/obtém + Record em uma chamada).
+	Histogram(ctx context.Context, name string, value int64) error
+
+	// Duration grava uma duração em segundos em um histograma float64 (atalho: cria/obtém + Record em uma chamada).
+	Duration(ctx context.Context, name string, value float64) error
 }
 
 // Compile-time: *Telemetry satisfaz Client.
@@ -299,4 +311,46 @@ func (t *Telemetry) HealthRegister(name string, check func(ctx context.Context) 
 		t.healthChecks = make(map[string]func(ctx context.Context) error)
 	}
 	t.healthChecks[name] = check
+}
+
+// Counter incrementa um contador int64 (atalho: cria/obtém + Add em uma chamada).
+func (t *Telemetry) Counter(ctx context.Context, name string, value int64) error {
+	c, err := t.Meter.Counter(name)
+	if err != nil {
+		return err
+	}
+	c.Add(ctx, value)
+	return nil
+}
+
+// Gauge grava um valor em um gauge int64 (atalho: cria/obtém + Record em uma chamada).
+// Nota: Int64Gauge do OTel é observável (callback), para set direto use Int64ObservableGauge via RegisterCallback.
+// Este atalho usa Record no Int64Gauge (compatível com OTel 1.27+).
+func (t *Telemetry) Gauge(ctx context.Context, name string, value int64) error {
+	g, err := t.Meter.Int64Gauge(name)
+	if err != nil {
+		return err
+	}
+	g.Record(ctx, value)
+	return nil
+}
+
+// Histogram grava um valor em um histograma int64 (atalho: cria/obtém + Record em uma chamada).
+func (t *Telemetry) Histogram(ctx context.Context, name string, value int64) error {
+	h, err := t.Meter.Int64Histogram(name)
+	if err != nil {
+		return err
+	}
+	h.Record(ctx, value)
+	return nil
+}
+
+// Duration grava uma duração em segundos em um histograma float64 (atalho: cria/obtém + Record em uma chamada).
+func (t *Telemetry) Duration(ctx context.Context, name string, value float64) error {
+	h, err := t.Meter.Float64Histogram(name)
+	if err != nil {
+		return err
+	}
+	h.Record(ctx, value)
+	return nil
 }
