@@ -189,3 +189,15 @@ func newLoggerProvider(opts Options, res *sdkresource.Resource) (*sdklog.LoggerP
 // Log retorna a abstração de logs. Nome evita colisão com o campo exportado Logger.
 // O logger retornado deriva correlação do contexto-base internamente.
 func (t *Telemetry) Log() Logger { return slogLogger{l: t.Logger, ctx: t.baseCtx} }
+
+// Error loga no nível Error (delegam para Log().Error).
+func (t *Telemetry) Error(msg string, args ...any) { t.Log().Error(msg, args...) }
+
+// Warn loga no nível Warn (delegam para Log().Warn).
+func (t *Telemetry) Warn(msg string, args ...any) { t.Log().Warn(msg, args...) }
+
+// Info loga no nível Info (delegam para Log().Info).
+func (t *Telemetry) Info(msg string, args ...any) { t.Log().Info(msg, args...) }
+
+// Debug loga no nível Debug (delegam para Log().Debug).
+func (t *Telemetry) Debug(msg string, args ...any) { t.Log().Debug(msg, args...) }
