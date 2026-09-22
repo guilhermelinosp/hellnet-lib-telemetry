@@ -48,7 +48,7 @@ Telemetria é a **torre de controle** + um painelzinho de instrumentos na sua fr
 
 ```go
 tel, err := telemetry.New() // sem parâmetros: lê HELLNET_* e usa context.Background() como base
-defer func() { _ = tel.Shutdown() }() // desliga na ordem certa, sem perder relatórios
+defer func() { _ = tel.Close() }() // desliga na ordem certa, sem perder relatórios
 mux.Handle("/", telemetry.Middleware(tel, meuHandler)) // o porteiro anota cada request
 ```
 
@@ -74,7 +74,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer tel.Shutdown()
+	defer tel.Close()
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /live", tel.Live())
@@ -562,14 +562,14 @@ Métricas: `db_sql_*` (veja catálogo acima), particionadas por `db=name`.
 
 ---
 
-## Shutdown
+## Close
 
 > 🧒 **Entenda com 15 anos:** desligar na ordem certa pra não perder relatórios.
 
 Sempre chame para flush dos buffers:
 
 ```go
-defer tel.Shutdown() // timeout interno de 5s; força flush OTLP + Prometheus
+defer tel.Close() // timeout interno de 5s; força flush OTLP + Prometheus
 ```
 
 ---
@@ -610,17 +610,9 @@ tracing estão desligados, os acessores retornam implementações noop (nunca `n
 
 ## Profiling
 
-Dois modos, ambos automáticos:
+Um modo, pull-based:
 
-1. **Push → Pyroscope** (contínuo): inicia sozinho no `New()` quando há
-   `HELLNET_TELEMETRY_ENDPOINT`. O endpoint é **derivado do mesmo endpoint OTLP**:
-   - In-cluster (`http://alloy:4318`) → `http://alloy:9999` (porta do `pyroscope.receive_http`)
-   - Gateway (`https://alloy.hellnet.com.br`) → `https://alloy.hellnet.com.br/ingest`
-   - Override: `HELLNET_TELEMETRY_PROFILE_ENDPOINT` (quando o Alloy não usa a porta 9999)
-   Habilita sempre CPU, heap (alloc/inuse), goroutines, **block** e **mutex**.
-   Para no `Shutdown()`.
-
-2. **Pull → pprof** (sob demanda): monte os handlers no mux:
+1. **Pull → pprof** (sob demanda): monte os handlers no mux:
    ```go
    tel.ProfilesRegister(mux) // /debug/pprof/ (cpu, heap, goroutine, block, mutex, trace)
    ```
@@ -636,7 +628,6 @@ Dois modos, ambos automáticos:
 | Nada aparece no Grafana, mas logs vão para stdout | **`.env` não carregado** → lib em modo no-op | O `New()` **deve** chamar `environments.LoadDotEnv()`. Confirme no startup: `telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio` |
 | `telemetry iniciado ... Alloy inacessível no startup` | Endpoint não responde (rede/VPN/port-forward) | Valide: `curl -v https://alloy.hellnet.com.br/v1/traces`; use port-forward ou HTTPRoute acessível |
 | Traces/Tempo OK, mas metrics não no Prometheus | Prometheus sem `--web.enable-remote-write-receiver` | Adicione a flag ao args do Prometheus |
-| Profiles não no Pyroscope | Endpoint derivado errado (Alloy com porta ≠ 9999) | Sete `HELLNET_TELEMETRY_PROFILE_ENDPOINT` |
 | `405` ao testar OTLP com curl GET | Normal — OTLP HTTP usa **POST** | Use `curl -X POST` |
 
 ---
@@ -658,7 +649,7 @@ Dois modos, ambos automáticos:
 | `tel.Worker(job, fn, extra...)` | Job/worker: span + `worker_*` metrics (ctx vem do baseCtx) |
 | `tel.HTTPClient(opts...)` | `*http.Client` outbound: trace W3C + retry/backoff + métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
-| `tel.Shutdown()` | Flush OTLP + Prometheus |
+| `tel.Close()` | Flush OTLP + Prometheus |
 | `opts.RedactSensitive` / `opts.RedactKeys` | Mascara PII nos logs |
 
 ---
