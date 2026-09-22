@@ -63,6 +63,26 @@ func (t *Telemetry) WithSpan(name string, fn func(ctx context.Context) error) er
 	return err
 }
 
+// Span cria um span FILHO do ctx do caller, executa fn e finaliza. Em erro,
+// registra o erro e marca o status como erro. Recebe o ctx explicitamente
+// (diferente de WithSpan/Worker, que derivam o pai da pilha interna) — é a
+// superfície recomendada para libs instrumentarem operações concretas (uma
+// query de DB, um publish Kafka, uma chamada HTTP) dentro de um trace que já
+// vem de fora. Nil-safe: se t for nil, executa fn direto sem span.
+func (t *Telemetry) Span(ctx context.Context, name string, fn func(ctx context.Context) error) error {
+	if t == nil {
+		return fn(ctx)
+	}
+	cctx, span := t.Trace().Start(ctx, name)
+	defer span.End()
+	if err := fn(cctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
+}
+
 // currentSpanParent devolve o pai do próximo span criado por runBaseSpan:
 // quando há um span desta lib ativo (topo da pilha de aninhamento), retorna-o
 // (o novo span nasce FILHO dele); caso contrário (ou se o span do topo não é

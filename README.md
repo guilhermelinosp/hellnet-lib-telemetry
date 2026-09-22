@@ -598,6 +598,14 @@ tel.Meter.Counter("hellnet_smoke_ops_total")
 _, span := c.Trace().Start(parentCtx, "order")
 defer span.End()
 
+// Span(ctx, name, fn) — superfície RECOMENDADA para libs instrumentarem
+// operações concretas (DB, Kafka, HTTP) dentro de um trace já existente:
+// cria um span FILHO do ctx do caller, executa fn e marca erro no span.
+err := c.Span(parentCtx, "db.query", func(ctx context.Context) error {
+	// trace.SpanFromContext(ctx) está disponível p/ atributos extras
+	return doQuery(ctx)
+})
+
 // Logs (níveis padrão slog, sem ctx — correlação via contexto-base)
 c.Log().Error("boom", "err", err)
 c.Log().Info("started")
@@ -643,6 +651,7 @@ Um modo, pull-based:
 | `tel.HealthRegister(name, fn)` | Custom health check — ctx **fornecido pela lib** |
 | `tel.MetricsHandler()` | `http.Handler` Prometheus `/metrics` |
 | `tel.WithSpan(name, fn)` | Span (raiz = baseCtx) + erro automático + `exceptions_total` em panic |
+| `tel.Span(ctx, name, fn)` | Span FILHO do ctx do caller + erro automático — superfície para libs instrumentarem DB/Kafka/HTTP |
 | `tel.Trace().Start(ctx, name)` | Escape hatch avançado: span enraizado num ctx próprio |
 | `tel.Meter.Counter/Gauge/Histogram(name)` | Atalhos int64 de métrica |
 | `tel.Log().Info/Error(...)` | Logging estruturado sem ctx (stdout + OTLP) |

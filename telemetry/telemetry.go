@@ -105,6 +105,11 @@ type Client interface {
 	Close() error
 	WithSpan(name string, fn func(ctx context.Context) error) error
 	Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
+	// Span cria um span FILHO do ctx fornecido, executa fn e finaliza. Em erro,
+	// marca o span como erro (RecordError + SetStatus). É a superfície ideal
+	// para libs instrumentarem operações concretas (DB, Kafka, HTTP) dentro de
+	// um trace já existente: recebe o ctx do caller e o repassa para fn.
+	Span(ctx context.Context, name string, fn func(ctx context.Context) error) error
 	// Direct logging convenience methods (delegam para Log().*())
 	Error(msg string, args ...any)
 	Warn(msg string, args ...any)
