@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // newTestTel constrói um Telemetry sem collector real (endpoint vazio) para os
@@ -219,6 +222,48 @@ func TestWithSpanPanic(t *testing.T) {
 	_ = tel.WithSpan("op", func(ctx context.Context) error {
 		panic("boom")
 	})
+}
+
+func TestSpanFromContext(t *testing.T) {
+	tel := newTestTel(t)
+	// Span cria um span filho do ctx informado e repassa o ctx com o span ativo.
+	var ok bool
+	err := tel.Span(context.Background(), "db.query", func(ctx context.Context) error {
+		sc := trace.SpanFromContext(ctx).SpanContext()
+		ok = sc.IsValid()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Span erro: %v", err)
+	}
+	if !ok {
+		t.Fatal("ctx não carrega um span válido dentro de fn")
+	}
+}
+
+func TestSpanError(t *testing.T) {
+	tel := newTestTel(t)
+	err := tel.Span(context.Background(), "db.query", func(ctx context.Context) error {
+		return errors.New("boom")
+	})
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("Span err = %v, want boom", err)
+	}
+}
+
+func TestSpanNilTelemetry(t *testing.T) {
+	var tel *Telemetry
+	ran := false
+	err := tel.Span(context.Background(), "noop", func(ctx context.Context) error {
+		ran = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Span nil err: %v", err)
+	}
+	if !ran {
+		t.Fatal("fn não foi chamada com tel nil")
+	}
 }
 
 func TestWorker(t *testing.T) {
