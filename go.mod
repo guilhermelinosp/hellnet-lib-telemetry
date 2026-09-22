@@ -3,7 +3,7 @@ module github.com/guilhermelinosp/hellnet-lib-telemetry
 go 1.27.0
 
 require (
-	github.com/guilhermelinosp/hellnet-lib-environments v1.1.21
+	github.com/guilhermelinosp/hellnet-lib-environments v1.1.24
 	github.com/prometheus/client_golang v1.24.1
 	go.opentelemetry.io/contrib/bridges/otelslog v0.20.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0
