@@ -21,11 +21,11 @@ func newTestTel(t *testing.T) *Telemetry {
 	if err != nil {
 		t.Fatalf("New() retornou erro: %v", err)
 	}
-	t.Cleanup(func() { _ = tel.Shutdown() })
+	t.Cleanup(func() { _ = tel.Close() })
 	return tel
 }
 
-func TestNewAndShutdown(t *testing.T) {
+func TestNewAndClose(t *testing.T) {
 	tel := newTestTel(t)
 	if tel == nil {
 		t.Fatal("New() retornou nil")
@@ -36,8 +36,8 @@ func TestNewAndShutdown(t *testing.T) {
 	if tel.Logger == nil {
 		t.Fatal("Logger não deve ser nil")
 	}
-	if err := tel.Shutdown(); err != nil {
-		t.Fatalf("Shutdown() erro: %v", err)
+	if err := tel.Close(); err != nil {
+		t.Fatalf("Close() erro: %v", err)
 	}
 }
 
@@ -46,7 +46,7 @@ func TestMustNew(t *testing.T) {
 	if tel == nil {
 		t.Fatal("MustNew() retornou nil")
 	}
-	_ = tel.Shutdown()
+	_ = tel.Close()
 }
 
 // TestNewLoadsDotEnv é o teste de regressão do bug crítico: o New() deve
@@ -65,7 +65,7 @@ func TestNewLoadsDotEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() erro: %v", err)
 	}
-	defer tel.Shutdown()
+	defer tel.Close()
 	if tel.otlpEndpoint != "http://test-collector:4318" {
 		t.Fatalf("endpoint = %q, want http://test-collector:4318 (LoadDotEnv não carregou o .env)", tel.otlpEndpoint)
 	}
@@ -306,64 +306,6 @@ func TestProfilesRegister(t *testing.T) {
 	}
 }
 
-func TestProfilesStartNoEndpoint(t *testing.T) {
-	tel := newTestTel(t)
-	// Sem endpoint configurado (newTestTel zera HELLNET_TELEMETRY_ENDPOINT),
-	// ProfilesStart deve retornar erro (não conecta).
-	prof, err := tel.ProfilesStart()
-	if err == nil {
-		t.Fatal("esperado erro com HELLNET_TELEMETRY_ENDPOINT vazio")
-	}
-	if prof != nil {
-		t.Fatal("profiler não deve ser retornado em caso de erro")
-	}
-}
-
-func TestDeriveProfileEndpoint(t *testing.T) {
-	tests := []struct {
-		name string
-		base string
-		want string
-	}{
-		{name: "in-cluster", base: "http://alloy:4318", want: "http://alloy:9999"},
-		{name: "in-cluster root path", base: "http://alloy:4318/", want: "http://alloy:9999"},
-		{name: "gateway", base: "https://alloy.hellnet.com.br", want: "https://alloy.hellnet.com.br/ingest"},
-		{name: "gateway with v1", base: "https://alloy.hellnet.com.br/v1/", want: "https://alloy.hellnet.com.br/ingest"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := deriveProfileEndpoint(tt.base)
-			if err != nil {
-				t.Fatalf("erro inesperado: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("deriveProfileEndpoint(%q) = %q, want %q", tt.base, got, tt.want)
-			}
-		})
-	}
-	if _, err := deriveProfileEndpoint(""); err == nil {
-		t.Fatal("esperado erro com base vazia")
-	}
-}
-
-// TestProfilesStartIntegration valida o auto-start do push Pyroscope via New()
-// (derivando o endpoint do HELLNET_TELEMETRY_ENDPOINT). Pulado a menos que
-// ALLOY_ENDPOINT esteja definido (ex.: http://alloy:4318 ou https://alloy.hellnet.com.br).
-func TestProfilesStartIntegration(t *testing.T) {
-	endpoint := os.Getenv("ALLOY_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("defina ALLOY_ENDPOINT para rodar a integração real com o Pyroscope/Alloy")
-	}
-	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
-	tel := MustNew() // auto-inicia ProfilesStart() internamente
-	defer tel.Shutdown()
-	if tel.profiler == nil {
-		t.Fatal("profiler não iniciou automaticamente no New()")
-	}
-	// dá tempo do profiler registrar/enviar o primeiro snapshot
-	time.Sleep(2 * time.Second)
-}
-
 // TestAlloyIntegration valida o envio real de traces/metrics/logs para um
 // collector Alloy. É pulado a menos que ALLOY_ENDPOINT esteja definido
 // (ex.: http://alloy:4318 ou https://alloy.hellnet.com.br).
@@ -375,7 +317,7 @@ func TestAlloyIntegration(t *testing.T) {
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
 	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
 	tel := MustNew()
-	defer tel.Shutdown()
+	defer tel.Close()
 
 	tel.Log().Info("integration test log", "ok", true)
 	if err := tel.WithSpan("integration-span", func(ctx context.Context) error {
