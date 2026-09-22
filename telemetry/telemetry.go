@@ -3,7 +3,7 @@
 // Usage (sem parâmetros — a lib lê tudo do ambiente: .env + HELLNET_*):
 //
 //	tel, err := telemetry.New()
-//	defer tel.Shutdown()
+//	defer tel.Close()
 //
 //	// Tracing (no ctx in the API — spans derive from the base context)
 //	err := tel.WithSpan("operation", func(ctx context.Context) error {
@@ -32,6 +32,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -75,10 +76,6 @@ type Telemetry struct {
 	mp *sdkmetric.MeterProvider
 
 	promRegistry *prometheus.Registry
-
-	// profiler é o profiler Pyroscope (push), iniciado via ProfilesStart e
-	// parado em Shutdown.
-	profiler pyroscopeProfiler
 }
 
 // Options configures the Telemetry instance.
@@ -105,7 +102,7 @@ type Client interface {
 	Log() Logger
 	Trace() Tracer
 	Metric() Meter
-	Shutdown() error
+	Close() error
 	WithSpan(name string, fn func(ctx context.Context) error) error
 	Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
 	// Direct logging convenience methods (delegam para Log().*())
@@ -129,6 +126,16 @@ type Client interface {
 
 // Compile-time: *Telemetry satisfaz Client.
 var _ Client = (*Telemetry)(nil)
+
+// envString retorna o primeiro valor não-vazio entre os nomes dados.
+func envString(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 // otlpSignalURL retorna a URL completa de um sinal OTLP (traces/metrics/logs)
 // anexando o path do signal quando o ENDPOINT base não traz path. Versões
@@ -169,9 +176,9 @@ func New() (*Telemetry, error) {
 	_ = environments.LoadDotEnv()
 
 	o := Options{
-		ServiceName:  environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "SERVICE", ""),
-		OTLPEndpoint: environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "ENDPOINT", ""),
-		Environment:  environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "ENVIRONMENT", ""),
+		ServiceName:  envString("HELLNET_TELEMETRY_SERVICE", "HELLNET_SERVICE"),
+		OTLPEndpoint: envString("HELLNET_TELEMETRY_ENDPOINT", "HELLNET_ENDPOINT"),
+		Environment:  envString("HELLNET_TELEMETRY_ENVIRONMENT", "HELLNET_ENVIRONMENT"),
 		LogLevel:     slog.LevelInfo,
 	}
 
@@ -218,21 +225,12 @@ func New() (*Telemetry, error) {
 	if o.OTLPEndpoint == "" {
 		tel.Logger.Warn("telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio, nada será exportado")
 	} else {
-		tel.Logger.Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "profiling", "auto", "env", o.Environment)
+		tel.Logger.Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "env", o.Environment)
 		// Conectividade do Alloy já é coberta pelo check "otlp-collector"
 		// embutido em runChecks (ver instrumentation.go) — não registrar duplicado.
 		if err := checkOTLPReachable(ctx, o.OTLPEndpoint); err != nil {
 			tel.Logger.Warn("telemetry: Alloy inacessível no startup (dados podem não chegar)",
 				"endpoint", o.OTLPEndpoint, "error", err)
-		}
-	}
-
-	// Profiling push (Pyroscope): inicia automaticamente quando há collector
-	// OTLP configurado. Se não houver endpoint, fica desligado silenciosamente
-	// (não falha o New — profiling é best-effort).
-	if o.OTLPEndpoint != "" {
-		if _, err := tel.ProfilesStart(); err != nil {
-			tel.Logger.Warn("telemetry: profiling não iniciado", "error", err)
 		}
 	}
 
@@ -248,12 +246,12 @@ func MustNew() *Telemetry {
 	return t
 }
 
-// Shutdown flushes telemetry data and cleans up resources. Each provider
+// Close flushes telemetry data and cleans up resources. Each provider
 // (logs/traces/metrics) gets a DEDICATED 5s timeout context and the three
 // shut down IN PARALLEL — one slow/timing-out provider no longer consumes the
 // budget of the others. Errors are aggregated in stable order
 // (logs → traces → metrics). Call with defer when the service terminates.
-func (t *Telemetry) Shutdown() error {
+func (t *Telemetry) Close() error {
 	const shutdownTimeout = 5 * time.Second
 
 	// shutters em ordem estável para a agregação de erros (logs → traces → metrics).
@@ -266,9 +264,6 @@ func (t *Telemetry) Shutdown() error {
 	}
 	if t.mp != nil {
 		shutters = append(shutters, t.mp.Shutdown)
-	}
-	if t.profiler != nil {
-		shutters = append(shutters, func(context.Context) error { return t.profiler.Stop() })
 	}
 
 	// Cada provider desliga em PARALELO com orçamento próprio de 5s; escreve
