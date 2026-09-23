@@ -90,14 +90,15 @@ func main() {
 
 ## Required environment variables
 
-A lib aceita o prefixo **`HELLNET_TELEMETRY_*`** (padrão hellnet) ou o antigo
-**`HELLNET_*`** (fallback de retrocompatibilidade). Ambos funcionam.
+A lib usa **`HELLNET_SERVICE`** e **`HELLNET_ENVIRONMENT`** como envs canônicas
+do processo. As envs **`HELLNET_TELEMETRY_*`** permanecem como fallback de
+retrocompatibilidade ou para configurações específicas de telemetria.
 
 | Variable | Example | Description |
 |---|---|---|
-| `HELLNET_TELEMETRY_SERVICE` | `order-api` | Service identifier (required) |
+| `HELLNET_SERVICE` | `order-api` | Service identifier (required) |
 | `HELLNET_TELEMETRY_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (required). **A porta deve vir junto do endpoint** (ex.: `:4318` ou `:443`); não há variável de porta separada. Se a porta for omitida, é inferida do scheme (443 p/ https, 80 p/ http) |
-| `HELLNET_TELEMETRY_ENVIRONMENT` | `Development` | Ambiente (**opcional**); usado como atributo de resource (`deployment.environment`) |
+| `HELLNET_ENVIRONMENT` | `Development` | Ambiente (**opcional**); usado como atributo de resource (`deployment.environment`) |
 
 > Apenas `SERVICE` e `ENDPOINT` são obrigatórios. A porta **não** é configurável via env separada — ela vive no `ENDPOINT`. Não há carregamento de arquivo `.env`.
 
