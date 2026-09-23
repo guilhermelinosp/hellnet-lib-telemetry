@@ -18,6 +18,8 @@ import (
 // testes unitários não tentarem conexões de rede.
 func newTestTel(t *testing.T) *Telemetry {
 	t.Helper()
+	t.Setenv("HELLNET_SERVICE", "")
+	t.Setenv("HELLNET_ENVIRONMENT", "")
 	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", "")
 	tel, err := New()
@@ -26,6 +28,27 @@ func newTestTel(t *testing.T) *Telemetry {
 	}
 	t.Cleanup(func() { _ = tel.Close() })
 	return tel
+}
+
+func TestNewPrefersProcessEnvironment(t *testing.T) {
+	t.Setenv("HELLNET_SERVICE", "fast-sockets")
+	t.Setenv("HELLNET_ENVIRONMENT", "Development")
+	t.Setenv("HELLNET_TELEMETRY_SERVICE", "legacy-service")
+	t.Setenv("HELLNET_TELEMETRY_ENVIRONMENT", "legacy-environment")
+	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", "")
+
+	tel, err := New()
+	if err != nil {
+		t.Fatalf("New() retornou erro: %v", err)
+	}
+	defer tel.Close()
+
+	if tel.serviceName != "fast-sockets" {
+		t.Errorf("serviceName = %q, want fast-sockets", tel.serviceName)
+	}
+	if tel.environment != "Development" {
+		t.Errorf("environment = %q, want Development", tel.environment)
+	}
 }
 
 func TestNewAndClose(t *testing.T) {
@@ -59,11 +82,14 @@ func TestMustNew(t *testing.T) {
 func TestNewLoadsDotEnv(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(
-		"HELLNET_TELEMETRY_SERVICE=test-svc\n"+
+		"HELLNET_SERVICE=test-svc\n"+
+			"HELLNET_ENVIRONMENT=Test\n"+
 			"HELLNET_TELEMETRY_ENDPOINT=http://test-collector:4318\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
+	t.Setenv("HELLNET_TELEMETRY_SERVICE", "")
+	t.Setenv("HELLNET_TELEMETRY_ENVIRONMENT", "")
 	tel, err := New()
 	if err != nil {
 		t.Fatalf("New() erro: %v", err)
@@ -74,6 +100,9 @@ func TestNewLoadsDotEnv(t *testing.T) {
 	}
 	if tel.serviceName != "test-svc" {
 		t.Fatalf("serviceName = %q, want test-svc", tel.serviceName)
+	}
+	if tel.environment != "Test" {
+		t.Fatalf("environment = %q, want Test", tel.environment)
 	}
 }
 

@@ -166,7 +166,9 @@ func otlpSignalURL(base, signalPath string) string {
 // # Sem parâmetros — leitura de ambiente
 //
 // A lib carrega tudo do ambiente: carrega o .env (dev) + lê as envs
-// HELLNET_TELEMETRY_* / HELLNET_* obrigatórias (env-first), sem receber ctx
+// HELLNET_SERVICE / HELLNET_ENVIRONMENT são as envs canônicas do processo;
+// HELLNET_TELEMETRY_* permanece como fallback compatível. HELLNET_* obrigatórias
+// (env-first), sem receber ctx
 // nem Options. Usa context.Background() como contexto-base (baseCtx).
 //
 // Requer HELLNET_TELEMETRY_SERVICE (ou HELLNET_SERVICE) e
@@ -181,9 +183,9 @@ func New() (*Telemetry, error) {
 	_ = environments.LoadDotEnv()
 
 	o := Options{
-		ServiceName:  envString("HELLNET_TELEMETRY_SERVICE", "HELLNET_SERVICE"),
+		ServiceName:  envString("HELLNET_SERVICE", "HELLNET_TELEMETRY_SERVICE"),
 		OTLPEndpoint: envString("HELLNET_TELEMETRY_ENDPOINT", "HELLNET_ENDPOINT"),
-		Environment:  envString("HELLNET_TELEMETRY_ENVIRONMENT", "HELLNET_ENVIRONMENT"),
+		Environment:  envString("HELLNET_ENVIRONMENT", "HELLNET_TELEMETRY_ENVIRONMENT"),
 		LogLevel:     slog.LevelInfo,
 	}
 
