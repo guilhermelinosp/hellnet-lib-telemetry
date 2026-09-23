@@ -32,7 +32,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/url"
-	"os"
 	"sync"
 	"time"
 
@@ -87,6 +86,18 @@ type Options struct {
 	ResourceAttrs []attribute.KeyValue
 }
 
+func Default() Options {
+	return Options{LogLevel: slog.LevelInfo}
+}
+
+func (o *Options) from(base Options) {
+	o.ServiceName = environments.GetString("HELLNET_SERVICE", base.ServiceName)
+	o.OTLPEndpoint = environments.GetString("TELEMETRY_ENDPOINT", base.OTLPEndpoint)
+	o.Environment = environments.GetString("HELLNET_ENVIRONMENT", base.Environment)
+	o.LogLevel = base.LogLevel
+	o.ResourceAttrs = base.ResourceAttrs
+}
+
 // Client é a abstração composta dos 3 sinais + lifecycle.
 // Use para injeção de dependência e testes:
 //
@@ -132,16 +143,6 @@ type Client interface {
 // Compile-time: *Telemetry satisfaz Client.
 var _ Client = (*Telemetry)(nil)
 
-// envString retorna o primeiro valor não-vazio entre os nomes dados.
-func envString(names ...string) string {
-	for _, n := range names {
-		if v := os.Getenv(n); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
 // otlpSignalURL retorna a URL completa de um sinal OTLP (traces/metrics/logs)
 // anexando o path do signal quando o ENDPOINT base não traz path. Versões
 // recentes do exporter OTel HTTP (v1.45+) NÃO anexam /v1/traces automaticamente
@@ -181,12 +182,8 @@ func New() (*Telemetry, error) {
 	// erro de parse, cai para as env vars reais do processo.
 	_ = environments.LoadDotEnv()
 
-	o := Options{
-		ServiceName:  envString("HELLNET_SERVICE"),
-		OTLPEndpoint: envString("TELEMETRY_ENDPOINT"),
-		Environment:  envString("HELLNET_ENVIRONMENT"),
-		LogLevel:     slog.LevelInfo,
-	}
+	o := Default()
+	o.from(o)
 
 	// Build resource with service info
 	resourceAttrs := []attribute.KeyValue{
