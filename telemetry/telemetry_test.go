@@ -20,8 +20,7 @@ func newTestTel(t *testing.T) *Telemetry {
 	t.Helper()
 	t.Setenv("HELLNET_SERVICE", "")
 	t.Setenv("HELLNET_ENVIRONMENT", "")
-	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
-	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", "")
+	t.Setenv("TELEMETRY_ENDPOINT", "")
 	tel, err := New()
 	if err != nil {
 		t.Fatalf("New() retornou erro: %v", err)
@@ -33,9 +32,7 @@ func newTestTel(t *testing.T) *Telemetry {
 func TestNewPrefersProcessEnvironment(t *testing.T) {
 	t.Setenv("HELLNET_SERVICE", "fast-sockets")
 	t.Setenv("HELLNET_ENVIRONMENT", "Development")
-	t.Setenv("HELLNET_TELEMETRY_SERVICE", "legacy-service")
-	t.Setenv("HELLNET_TELEMETRY_ENVIRONMENT", "legacy-environment")
-	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", "")
+	t.Setenv("TELEMETRY_ENDPOINT", "")
 
 	tel, err := New()
 	if err != nil {
@@ -84,12 +81,10 @@ func TestNewLoadsDotEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(
 		"HELLNET_SERVICE=test-svc\n"+
 			"HELLNET_ENVIRONMENT=Test\n"+
-			"HELLNET_TELEMETRY_ENDPOINT=http://test-collector:4318\n"), 0o644); err != nil {
+			"TELEMETRY_ENDPOINT=http://test-collector:4318\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	t.Setenv("HELLNET_TELEMETRY_SERVICE", "")
-	t.Setenv("HELLNET_TELEMETRY_ENVIRONMENT", "")
 	tel, err := New()
 	if err != nil {
 		t.Fatalf("New() erro: %v", err)
@@ -388,8 +383,7 @@ func TestAlloyIntegration(t *testing.T) {
 	if endpoint == "" {
 		t.Skip("defina ALLOY_ENDPOINT (ex.: http://alloy:4318) para rodar a integração real com o Alloy")
 	}
-	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
-	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
+	t.Setenv("TELEMETRY_ENDPOINT", endpoint)
 	tel := MustNew()
 	defer tel.Close()
 

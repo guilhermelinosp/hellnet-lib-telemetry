@@ -166,13 +166,12 @@ func otlpSignalURL(base, signalPath string) string {
 // # Sem parâmetros — leitura de ambiente
 //
 // A lib carrega tudo do ambiente: carrega o .env (dev) + lê as envs
-// HELLNET_SERVICE / HELLNET_ENVIRONMENT são as envs canônicas do processo;
-// HELLNET_TELEMETRY_* permanece como fallback compatível. HELLNET_* obrigatórias
+// HELLNET_SERVICE / HELLNET_ENVIRONMENT são as únicas envs canônicas globais;
+// TELEMETRY_* contém as configurações específicas de observabilidade.
 // (env-first), sem receber ctx
 // nem Options. Usa context.Background() como contexto-base (baseCtx).
 //
-// Requer HELLNET_TELEMETRY_SERVICE (ou HELLNET_SERVICE) e
-// HELLNET_TELEMETRY_ENDPOINT (ou HELLNET_ENDPOINT) definidos.
+// Requer HELLNET_SERVICE e TELEMETRY_ENDPOINT definidos para exportação.
 func New() (*Telemetry, error) {
 	ctx := context.Background()
 
@@ -183,9 +182,9 @@ func New() (*Telemetry, error) {
 	_ = environments.LoadDotEnv()
 
 	o := Options{
-		ServiceName:  envString("HELLNET_SERVICE", "HELLNET_TELEMETRY_SERVICE"),
-		OTLPEndpoint: envString("HELLNET_TELEMETRY_ENDPOINT", "HELLNET_ENDPOINT"),
-		Environment:  envString("HELLNET_ENVIRONMENT", "HELLNET_TELEMETRY_ENVIRONMENT"),
+		ServiceName:  envString("HELLNET_SERVICE"),
+		OTLPEndpoint: envString("TELEMETRY_ENDPOINT"),
+		Environment:  envString("HELLNET_ENVIRONMENT"),
 		LogLevel:     slog.LevelInfo,
 	}
 
@@ -230,7 +229,7 @@ func New() (*Telemetry, error) {
 	// conectividade com o Alloy. Evita o cenário de "modo no-op silencioso"
 	// (nada é exportado sem o usuário saber) que já causou confusão.
 	if o.OTLPEndpoint == "" {
-		tel.Logger.Warn("telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio, nada será exportado")
+		tel.Logger.Warn("telemetry em modo no-op: TELEMETRY_ENDPOINT vazio, nada será exportado")
 	} else {
 		tel.Logger.Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "env", o.Environment)
 		// Conectividade do Alloy já é coberta pelo check "otlp-collector"

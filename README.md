@@ -68,7 +68,7 @@ import (
 )
 
 func main() {
-	// Sem parâmetros: a lib lê HELLNET_TELEMETRY_* / HELLNET_* do ambiente e
+	// Sem parâmetros: a lib lê TELEMETRY_* / HELLNET_* do ambiente e
 	// usa context.Background() como contexto-base (baseCtx) internamente.
 	tel, err := telemetry.New()
 	if err != nil {
@@ -91,18 +91,18 @@ func main() {
 ## Required environment variables
 
 A lib usa **`HELLNET_SERVICE`** e **`HELLNET_ENVIRONMENT`** como envs canônicas
-do processo. As envs **`HELLNET_TELEMETRY_*`** permanecem como fallback de
+do processo. As envs **`TELEMETRY_*`** permanecem como fallback de
 retrocompatibilidade ou para configurações específicas de telemetria.
 
 | Variable | Example | Description |
 |---|---|---|
 | `HELLNET_SERVICE` | `order-api` | Service identifier (required) |
-| `HELLNET_TELEMETRY_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (required). **A porta deve vir junto do endpoint** (ex.: `:4318` ou `:443`); não há variável de porta separada. Se a porta for omitida, é inferida do scheme (443 p/ https, 80 p/ http) |
+| `TELEMETRY_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (required). **A porta deve vir junto do endpoint** (ex.: `:4318` ou `:443`); não há variável de porta separada. Se a porta for omitida, é inferida do scheme (443 p/ https, 80 p/ http) |
 | `HELLNET_ENVIRONMENT` | `Development` | Ambiente (**opcional**); usado como atributo de resource (`deployment.environment`) |
 
 > Apenas `SERVICE` e `ENDPOINT` são obrigatórios. A porta **não** é configurável via env separada — ela vive no `ENDPOINT`. Não há carregamento de arquivo `.env`.
 
-> **Endpoint vazio**: se `HELLNET_TELEMETRY_ENDPOINT` (ou `HELLNET_ENDPOINT`) não
+> **Endpoint vazio**: se `TELEMETRY_ENDPOINT` (ou `TELEMETRY_ENDPOINT`) não
 > for definido, o export OTLP é desligado (logs ficam só em stdout; métricas só
 > em `/metrics` Prometheus; traces não exportam) — em vez de tentar exportar para
 > uma URL inválida.`
@@ -114,11 +114,11 @@ retrocompatibilidade ou para configurações específicas de telemetria.
 ### De ambiente (sem parâmetros)
 
 `New()` **não recebe parâmetros** — a lib lê as envs
-`HELLNET_TELEMETRY_*` / `HELLNET_*` e usa `context.Background()` como
+`TELEMETRY_*` / `HELLNET_*` e usa `context.Background()` como
 contexto-base (`baseCtx`):
 
 ```go
-tel, _ := telemetry.New() // lê HELLNET_TELEMETRY_* / HELLNET_*
+tel, _ := telemetry.New() // lê TELEMETRY_* / HELLNET_*
 ```
 
 ### Application context (baseCtx)
@@ -634,7 +634,7 @@ Um modo, pull-based:
 
 | Sintoma | Causa provável | Solução |
 |---|---|---|
-| Nada aparece no Grafana, mas logs vão para stdout | **`.env` não carregado** → lib em modo no-op | O `New()` **deve** chamar `environments.LoadDotEnv()`. Confirme no startup: `telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio` |
+| Nada aparece no Grafana, mas logs vão para stdout | **`.env` não carregado** → lib em modo no-op | O `New()` **deve** chamar `environments.LoadDotEnv()`. Confirme no startup: `telemetry em modo no-op: TELEMETRY_ENDPOINT vazio` |
 | `telemetry iniciado ... Alloy inacessível no startup` | Endpoint não responde (rede/VPN/port-forward) | Valide: `curl -v https://alloy.hellnet.com.br/v1/traces`; use port-forward ou HTTPRoute acessível |
 | Traces/Tempo OK, mas metrics não no Prometheus | Prometheus sem `--web.enable-remote-write-receiver` | Adicione a flag ao args do Prometheus |
 | `405` ao testar OTLP com curl GET | Normal — OTLP HTTP usa **POST** | Use `curl -X POST` |

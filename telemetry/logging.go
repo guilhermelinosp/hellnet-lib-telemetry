@@ -194,7 +194,7 @@ func newZapHandler(minLevel slog.Level) *zapHandler {
 	cfg.Level = zap.NewAtomicLevelAt(level)
 	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	cfg.EncoderConfig.EncodeLevel = zapcore.LowercaseLevelEncoder
-core := zapcore.NewCore(
+	core := zapcore.NewCore(
 		zapcore.NewJSONEncoder(cfg.EncoderConfig),
 		zapcore.Lock(os.Stdout),
 		cfg.Level,
