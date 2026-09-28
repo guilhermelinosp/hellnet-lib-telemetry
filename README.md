@@ -218,7 +218,7 @@ Precisa enraizar um span num ctx próprio? Use a superfície explícita com ctx
 (documentada como interna/avançada; fora do fluxo padrão de correlação):
 
 ```go
-ctx, span := tel.Trace().Start(parentCtx, "operation-name",
+ctx, span := tel.RawTrace().Start(parentCtx, "operation-name",
 	trace.WithAttributes(attribute.String("order.id", "123")))
 defer span.End()
 
@@ -239,36 +239,35 @@ três formas de métricas:
    catálogo abaixo.
 2. **Instrumentação de cliente HTTP** (`tel.HTTPClient`) — automática ao usar o
    `http.Client` retornado.
-3. **Customizadas** — crie contadores/histogramas/gauges via `tel.Meter` (ou
-   `tel.Metric()`).
+3. **Customizadas** — crie contadores/histogramas/gauges via `tel.Metric(ctx)`.
 
 ### Custom metrics
 
 ```go
 // Counter (atalho int64, sem opts)
-requestsTotal, _ := tel.Meter.Counter("http.requests.total")
+requestsTotal, _ := tel.RawMeter().Counter("http.requests.total")
 requestsTotal.Add(ctx, 1, metric.WithAttributes(
 	attribute.String("method", "GET"),
 	attribute.String("path", "/api/users"),
 ))
 
 // Histogram
-requestDuration, _ := tel.Meter.Float64Histogram("http.request.duration")
+requestDuration, _ := tel.RawMeter().Float64Histogram("http.request.duration")
 requestDuration.Record(ctx, 0.123, metric.WithAttributes(
 	attribute.String("method", "GET"),
 ))
 
 // Observable Gauge (callback-based)
-activeConns, _ := tel.Meter.Int64ObservableGauge("http.connections.active")
-tel.Meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+activeConns, _ := tel.RawMeter().Int64ObservableGauge("http.connections.active")
+tel.RawMeter().RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 	o.ObserveInt64(activeConns, getActiveCount())
 	return nil
 }, activeConns)
 
 // Gauge (atalho int64)
-queueGauge, _ := tel.Meter.Gauge("queue.depth")
+queueGauge, _ := tel.RawMeter().Gauge("queue.depth")
 queueGauge.Record(ctx, int64(q))
-hist, _ := tel.Meter.Histogram("http_duration_ms")
+hist, _ := tel.RawMeter().Histogram("http_duration_ms")
 defer func(start time.Time) { hist.Record(ctx, time.Since(start).Milliseconds()) }(time.Now())
 ```
 
@@ -614,19 +613,21 @@ e os métodos são `Counter`/`Gauge`/`Histogram` agnósticos (genéricos).
 ```go
 var c telemetry.Client = tel
 
-// Metrics — tel.Meter expõe Counter/Gauge/Histogram (int64, nome sem tipo)
+// Metrics — tel.Metric(ctx) expõe atalhos context-aware
 // + toda a superfície crua de metric.Meter (Float64*, Observable*, RegisterCallback).
-counter, _ := c.Metric().Counter("req_total")
+counter := c.Metric(ctx).Counter("req_total", 1)
 counter.Add(ctx, 1)
-c.Metric().Gauge("queue").Record(ctx, int64(q))
-c.Metric().Histogram("latency").Record(ctx, d.Milliseconds())
-c.Metric().Float64Histogram("latency_s").Record(ctx, d.Seconds())
+c.Metric(ctx).Gauge("queue", int64(q))
+c.Metric(ctx).Histogram("latency", d.Seconds())
 
 // também direto no tel (sem passar pelo Client):
-tel.Meter.Counter("hellnet_smoke_ops_total")
+tel.Metric(ctx).Counter("hellnet_smoke_ops_total", 1)
 
 // Traces (escape hatch avançado; fluxo padrão é tel.WithSpan)
-_, span := c.Trace().Start(parentCtx, "order")
+err := c.Trace(parentCtx).Span("order", func(ctx context.Context) error {
+	return nil
+})
+_ = err
 defer span.End()
 
 // Logs (níveis Zap, sem ctx — correlação via contexto-base)
@@ -676,8 +677,9 @@ O profiling usa somente push para Pyroscope:
 | `tel.HealthRegister(name, fn)` | Custom health check — ctx **fornecido pela lib** |
 | `tel.WithSpan(name, fn)` | Span de compatibilidade para jobs sem contexto + erro automático |
 | `tel.WithSpanContext(ctx, name, fn)` / `tel.Span(ctx, name, fn)` | Span filho do contexto recebido |
-| `tel.Trace().Start(ctx, name)` | Escape hatch avançado: span enraizado num ctx próprio |
-| `tel.Meter.Counter/Gauge/Histogram(name)` | Atalhos int64 de métrica |
+| `tel.Trace(ctx).Span(name, fn)` | Span de aplicação context-aware |
+| `tel.RawTrace().Start(ctx, name)` | Escape hatch avançado de OTel |
+| `tel.Metric(ctx).Counter/Gauge/Histogram(name, value)` | Atalhos context-aware |
 | `tel.Log().Trace/Debug/Info/Warn/Error/Fatal/Critical(...)` | Logging estruturado (stdout + OTLP) |
 | `tel.Worker(job, fn, extra...)` | Job/worker de compatibilidade sem contexto |
 | `tel.HTTPClient(opts...)` | `*http.Client` outbound: trace W3C + retry/backoff + métricas `http_client_*` |

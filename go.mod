@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/grafana/pyroscope-go v1.4.2
+	github.com/joho/godotenv v1.5.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.22.0
