@@ -196,7 +196,7 @@ func TestWithSpanAndLog(t *testing.T) {
 	var inner bool
 	err := tel.WithSpan("op", func(ctx context.Context) error {
 		inner = true
-		logger := tel.LogContext(ctx)
+		logger := tel.Log(ctx)
 		logger.Trace("trace", "k", "v")
 		logger.Debug("debug", "k", "v")
 		logger.Info("info", "k", "v")

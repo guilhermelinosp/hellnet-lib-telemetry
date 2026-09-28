@@ -132,14 +132,20 @@ func contextFields(ctx context.Context) []zap.Field {
 	return []zap.Field{zap.String("trace_id", sc.TraceID().String()), zap.String("span_id", sc.SpanID().String())}
 }
 
-func (t *Telemetry) Log() Logger {
-	return zapLogger{l: t.Logger, ctx: t.baseCtx, onWrite: t.recordLogError}
-}
-func (t *Telemetry) LogContext(ctx context.Context) Logger {
+// Log returns a logger bound to ctx. With no context it keeps the legacy
+// base-context behavior for compatibility.
+func (t *Telemetry) Log(contexts ...context.Context) Logger {
+	ctx := t.baseCtx
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return zapLogger{l: t.Logger, ctx: ctx, onWrite: t.recordLogError}
+}
+func (t *Telemetry) LogContext(ctx context.Context) Logger {
+	return t.Log(ctx)
 }
 func (t *Telemetry) TraceLog(m string, a ...any) { t.Log().Trace(m, a...) }
 func (t *Telemetry) Critical(m string, a ...any) { t.Log().Critical(m, a...) }

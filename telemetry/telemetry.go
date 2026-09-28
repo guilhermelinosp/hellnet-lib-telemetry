@@ -104,7 +104,7 @@ type Options struct {
 //	c.Info("started", "port", port)     // log direto
 //	c.Debug("debug", "detail", val)     // log direto
 type Client interface {
-	Log() Logger
+	Log(ctx ...context.Context) Logger
 	Trace() Tracer
 	Metric() Meter
 	Close() error
