@@ -32,6 +32,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -91,11 +92,18 @@ func Default() Options {
 }
 
 func (o *Options) from(base Options) {
-	o.ServiceName = environments.GetString("HELLNET_SERVICE", base.ServiceName)
-	o.OTLPEndpoint = environments.GetString("TELEMETRY_ENDPOINT", base.OTLPEndpoint)
-	o.Environment = environments.GetString("HELLNET_ENVIRONMENT", base.Environment)
+	o.ServiceName = envString("HELLNET_SERVICE", base.ServiceName)
+	o.OTLPEndpoint = envString("TELEMETRY_ENDPOINT", base.OTLPEndpoint)
+	o.Environment = envString("HELLNET_ENVIRONMENT", base.Environment)
 	o.LogLevel = base.LogLevel
 	o.ResourceAttrs = base.ResourceAttrs
+}
+
+func envString(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }
 
 // Client é a abstração composta dos 3 sinais + lifecycle.
