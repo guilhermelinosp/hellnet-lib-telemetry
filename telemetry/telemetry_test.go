@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,23 +10,45 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // newTestTel constrói um Telemetry sem collector real (endpoint vazio) para os
 // testes unitários não tentarem conexões de rede.
 func newTestTel(t *testing.T) *Telemetry {
 	t.Helper()
-	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
-	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", "")
+	t.Setenv("HELLNET_SERVICE", "")
+	t.Setenv("HELLNET_ENVIRONMENT", "")
+	t.Setenv("TELEMETRY_ENDPOINT", "")
 	tel, err := New()
 	if err != nil {
 		t.Fatalf("New() retornou erro: %v", err)
 	}
-	t.Cleanup(func() { _ = tel.Shutdown() })
+	t.Cleanup(func() { _ = tel.Close() })
 	return tel
 }
 
-func TestNewAndShutdown(t *testing.T) {
+func TestNewPrefersProcessEnvironment(t *testing.T) {
+	t.Setenv("HELLNET_SERVICE", "fast-sockets")
+	t.Setenv("HELLNET_ENVIRONMENT", "Development")
+	t.Setenv("TELEMETRY_ENDPOINT", "")
+
+	tel, err := New()
+	if err != nil {
+		t.Fatalf("New() retornou erro: %v", err)
+	}
+	defer tel.Close()
+
+	if tel.serviceName != "fast-sockets" {
+		t.Errorf("serviceName = %q, want fast-sockets", tel.serviceName)
+	}
+	if tel.environment != "Development" {
+		t.Errorf("environment = %q, want Development", tel.environment)
+	}
+}
+
+func TestNewAndClose(t *testing.T) {
 	tel := newTestTel(t)
 	if tel == nil {
 		t.Fatal("New() retornou nil")
@@ -36,8 +59,8 @@ func TestNewAndShutdown(t *testing.T) {
 	if tel.Logger == nil {
 		t.Fatal("Logger não deve ser nil")
 	}
-	if err := tel.Shutdown(); err != nil {
-		t.Fatalf("Shutdown() erro: %v", err)
+	if err := tel.Close(); err != nil {
+		t.Fatalf("Close() erro: %v", err)
 	}
 }
 
@@ -46,7 +69,7 @@ func TestMustNew(t *testing.T) {
 	if tel == nil {
 		t.Fatal("MustNew() retornou nil")
 	}
-	_ = tel.Shutdown()
+	_ = tel.Close()
 }
 
 // TestNewLoadsDotEnv é o teste de regressão do bug crítico: o New() deve
@@ -56,8 +79,9 @@ func TestMustNew(t *testing.T) {
 func TestNewLoadsDotEnv(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(
-		"HELLNET_TELEMETRY_SERVICE=test-svc\n"+
-			"HELLNET_TELEMETRY_ENDPOINT=http://test-collector:4318\n"), 0o644); err != nil {
+		"HELLNET_SERVICE=test-svc\n"+
+			"HELLNET_ENVIRONMENT=Test\n"+
+			"TELEMETRY_ENDPOINT=http://test-collector:4318\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
@@ -65,12 +89,15 @@ func TestNewLoadsDotEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() erro: %v", err)
 	}
-	defer tel.Shutdown()
+	defer tel.Close()
 	if tel.otlpEndpoint != "http://test-collector:4318" {
 		t.Fatalf("endpoint = %q, want http://test-collector:4318 (LoadDotEnv não carregou o .env)", tel.otlpEndpoint)
 	}
 	if tel.serviceName != "test-svc" {
 		t.Fatalf("serviceName = %q, want test-svc", tel.serviceName)
+	}
+	if tel.environment != "Test" {
+		t.Fatalf("environment = %q, want Test", tel.environment)
 	}
 }
 
@@ -221,6 +248,48 @@ func TestWithSpanPanic(t *testing.T) {
 	})
 }
 
+func TestSpanFromContext(t *testing.T) {
+	tel := newTestTel(t)
+	// Span cria um span filho do ctx informado e repassa o ctx com o span ativo.
+	var ok bool
+	err := tel.Span(context.Background(), "db.query", func(ctx context.Context) error {
+		sc := trace.SpanFromContext(ctx).SpanContext()
+		ok = sc.IsValid()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Span erro: %v", err)
+	}
+	if !ok {
+		t.Fatal("ctx não carrega um span válido dentro de fn")
+	}
+}
+
+func TestSpanError(t *testing.T) {
+	tel := newTestTel(t)
+	err := tel.Span(context.Background(), "db.query", func(ctx context.Context) error {
+		return errors.New("boom")
+	})
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("Span err = %v, want boom", err)
+	}
+}
+
+func TestSpanNilTelemetry(t *testing.T) {
+	var tel *Telemetry
+	ran := false
+	err := tel.Span(context.Background(), "noop", func(ctx context.Context) error {
+		ran = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Span nil err: %v", err)
+	}
+	if !ran {
+		t.Fatal("fn não foi chamada com tel nil")
+	}
+}
+
 func TestWorker(t *testing.T) {
 	tel := newTestTel(t)
 	called := false
@@ -306,64 +375,6 @@ func TestProfilesRegister(t *testing.T) {
 	}
 }
 
-func TestProfilesStartNoEndpoint(t *testing.T) {
-	tel := newTestTel(t)
-	// Sem endpoint configurado (newTestTel zera HELLNET_TELEMETRY_ENDPOINT),
-	// ProfilesStart deve retornar erro (não conecta).
-	prof, err := tel.ProfilesStart()
-	if err == nil {
-		t.Fatal("esperado erro com HELLNET_TELEMETRY_ENDPOINT vazio")
-	}
-	if prof != nil {
-		t.Fatal("profiler não deve ser retornado em caso de erro")
-	}
-}
-
-func TestDeriveProfileEndpoint(t *testing.T) {
-	tests := []struct {
-		name string
-		base string
-		want string
-	}{
-		{name: "in-cluster", base: "http://alloy:4318", want: "http://alloy:9999"},
-		{name: "in-cluster root path", base: "http://alloy:4318/", want: "http://alloy:9999"},
-		{name: "gateway", base: "https://alloy.hellnet.com.br", want: "https://alloy.hellnet.com.br/ingest"},
-		{name: "gateway with v1", base: "https://alloy.hellnet.com.br/v1/", want: "https://alloy.hellnet.com.br/ingest"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := deriveProfileEndpoint(tt.base)
-			if err != nil {
-				t.Fatalf("erro inesperado: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("deriveProfileEndpoint(%q) = %q, want %q", tt.base, got, tt.want)
-			}
-		})
-	}
-	if _, err := deriveProfileEndpoint(""); err == nil {
-		t.Fatal("esperado erro com base vazia")
-	}
-}
-
-// TestProfilesStartIntegration valida o auto-start do push Pyroscope via New()
-// (derivando o endpoint do HELLNET_TELEMETRY_ENDPOINT). Pulado a menos que
-// ALLOY_ENDPOINT esteja definido (ex.: http://alloy:4318 ou https://alloy.hellnet.com.br).
-func TestProfilesStartIntegration(t *testing.T) {
-	endpoint := os.Getenv("ALLOY_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("defina ALLOY_ENDPOINT para rodar a integração real com o Pyroscope/Alloy")
-	}
-	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
-	tel := MustNew() // auto-inicia ProfilesStart() internamente
-	defer tel.Shutdown()
-	if tel.profiler == nil {
-		t.Fatal("profiler não iniciou automaticamente no New()")
-	}
-	// dá tempo do profiler registrar/enviar o primeiro snapshot
-	time.Sleep(2 * time.Second)
-}
-
 // TestAlloyIntegration valida o envio real de traces/metrics/logs para um
 // collector Alloy. É pulado a menos que ALLOY_ENDPOINT esteja definido
 // (ex.: http://alloy:4318 ou https://alloy.hellnet.com.br).
@@ -372,10 +383,9 @@ func TestAlloyIntegration(t *testing.T) {
 	if endpoint == "" {
 		t.Skip("defina ALLOY_ENDPOINT (ex.: http://alloy:4318) para rodar a integração real com o Alloy")
 	}
-	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
-	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
+	t.Setenv("TELEMETRY_ENDPOINT", endpoint)
 	tel := MustNew()
-	defer tel.Shutdown()
+	defer tel.Close()
 
 	tel.Log().Info("integration test log", "ok", true)
 	if err := tel.WithSpan("integration-span", func(ctx context.Context) error {

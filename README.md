@@ -48,7 +48,7 @@ Telemetria é a **torre de controle** + um painelzinho de instrumentos na sua fr
 
 ```go
 tel, err := telemetry.New() // sem parâmetros: lê HELLNET_* e usa context.Background() como base
-defer func() { _ = tel.Shutdown() }() // desliga na ordem certa, sem perder relatórios
+defer func() { _ = tel.Close() }() // desliga na ordem certa, sem perder relatórios
 mux.Handle("/", telemetry.Middleware(tel, meuHandler)) // o porteiro anota cada request
 ```
 
@@ -68,13 +68,13 @@ import (
 )
 
 func main() {
-	// Sem parâmetros: a lib lê HELLNET_TELEMETRY_* / HELLNET_* do ambiente e
+	// Sem parâmetros: a lib lê TELEMETRY_* / HELLNET_* do ambiente e
 	// usa context.Background() como contexto-base (baseCtx) internamente.
 	tel, err := telemetry.New()
 	if err != nil {
 		panic(err)
 	}
-	defer tel.Shutdown()
+	defer tel.Close()
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /live", tel.Live())
@@ -90,18 +90,19 @@ func main() {
 
 ## Required environment variables
 
-A lib aceita o prefixo **`HELLNET_TELEMETRY_*`** (padrão hellnet) ou o antigo
-**`HELLNET_*`** (fallback de retrocompatibilidade). Ambos funcionam.
+A lib usa **`HELLNET_SERVICE`** e **`HELLNET_ENVIRONMENT`** como envs canônicas
+do processo. As envs **`TELEMETRY_*`** permanecem como fallback de
+retrocompatibilidade ou para configurações específicas de telemetria.
 
 | Variable | Example | Description |
 |---|---|---|
-| `HELLNET_TELEMETRY_SERVICE` | `order-api` | Service identifier (required) |
-| `HELLNET_TELEMETRY_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (required). **A porta deve vir junto do endpoint** (ex.: `:4318` ou `:443`); não há variável de porta separada. Se a porta for omitida, é inferida do scheme (443 p/ https, 80 p/ http) |
-| `HELLNET_TELEMETRY_ENVIRONMENT` | `Development` | Ambiente (**opcional**); usado como atributo de resource (`deployment.environment`) |
+| `HELLNET_SERVICE` | `order-api` | Service identifier (required) |
+| `TELEMETRY_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (required). **A porta deve vir junto do endpoint** (ex.: `:4318` ou `:443`); não há variável de porta separada. Se a porta for omitida, é inferida do scheme (443 p/ https, 80 p/ http) |
+| `HELLNET_ENVIRONMENT` | `Development` | Ambiente (**opcional**); usado como atributo de resource (`deployment.environment`) |
 
 > Apenas `SERVICE` e `ENDPOINT` são obrigatórios. A porta **não** é configurável via env separada — ela vive no `ENDPOINT`. Não há carregamento de arquivo `.env`.
 
-> **Endpoint vazio**: se `HELLNET_TELEMETRY_ENDPOINT` (ou `HELLNET_ENDPOINT`) não
+> **Endpoint vazio**: se `TELEMETRY_ENDPOINT` (ou `TELEMETRY_ENDPOINT`) não
 > for definido, o export OTLP é desligado (logs ficam só em stdout; métricas só
 > em `/metrics` Prometheus; traces não exportam) — em vez de tentar exportar para
 > uma URL inválida.`
@@ -113,11 +114,11 @@ A lib aceita o prefixo **`HELLNET_TELEMETRY_*`** (padrão hellnet) ou o antigo
 ### De ambiente (sem parâmetros)
 
 `New()` **não recebe parâmetros** — a lib lê as envs
-`HELLNET_TELEMETRY_*` / `HELLNET_*` e usa `context.Background()` como
+`TELEMETRY_*` / `HELLNET_*` e usa `context.Background()` como
 contexto-base (`baseCtx`):
 
 ```go
-tel, _ := telemetry.New() // lê HELLNET_TELEMETRY_* / HELLNET_*
+tel, _ := telemetry.New() // lê TELEMETRY_* / HELLNET_*
 ```
 
 ### Application context (baseCtx)
@@ -562,14 +563,14 @@ Métricas: `db_sql_*` (veja catálogo acima), particionadas por `db=name`.
 
 ---
 
-## Shutdown
+## Close
 
 > 🧒 **Entenda com 15 anos:** desligar na ordem certa pra não perder relatórios.
 
 Sempre chame para flush dos buffers:
 
 ```go
-defer tel.Shutdown() // timeout interno de 5s; força flush OTLP + Prometheus
+defer tel.Close() // timeout interno de 5s; força flush OTLP + Prometheus
 ```
 
 ---
@@ -598,6 +599,14 @@ tel.Meter.Counter("hellnet_smoke_ops_total")
 _, span := c.Trace().Start(parentCtx, "order")
 defer span.End()
 
+// Span(ctx, name, fn) — superfície RECOMENDADA para libs instrumentarem
+// operações concretas (DB, Kafka, HTTP) dentro de um trace já existente:
+// cria um span FILHO do ctx do caller, executa fn e marca erro no span.
+err := c.Span(parentCtx, "db.query", func(ctx context.Context) error {
+	// trace.SpanFromContext(ctx) está disponível p/ atributos extras
+	return doQuery(ctx)
+})
+
 // Logs (níveis padrão slog, sem ctx — correlação via contexto-base)
 c.Log().Error("boom", "err", err)
 c.Log().Info("started")
@@ -610,17 +619,9 @@ tracing estão desligados, os acessores retornam implementações noop (nunca `n
 
 ## Profiling
 
-Dois modos, ambos automáticos:
+Um modo, pull-based:
 
-1. **Push → Pyroscope** (contínuo): inicia sozinho no `New()` quando há
-   `HELLNET_TELEMETRY_ENDPOINT`. O endpoint é **derivado do mesmo endpoint OTLP**:
-   - In-cluster (`http://alloy:4318`) → `http://alloy:9999` (porta do `pyroscope.receive_http`)
-   - Gateway (`https://alloy.hellnet.com.br`) → `https://alloy.hellnet.com.br/ingest`
-   - Override: `HELLNET_TELEMETRY_PROFILE_ENDPOINT` (quando o Alloy não usa a porta 9999)
-   Habilita sempre CPU, heap (alloc/inuse), goroutines, **block** e **mutex**.
-   Para no `Shutdown()`.
-
-2. **Pull → pprof** (sob demanda): monte os handlers no mux:
+1. **Pull → pprof** (sob demanda): monte os handlers no mux:
    ```go
    tel.ProfilesRegister(mux) // /debug/pprof/ (cpu, heap, goroutine, block, mutex, trace)
    ```
@@ -633,10 +634,9 @@ Dois modos, ambos automáticos:
 
 | Sintoma | Causa provável | Solução |
 |---|---|---|
-| Nada aparece no Grafana, mas logs vão para stdout | **`.env` não carregado** → lib em modo no-op | O `New()` **deve** chamar `environments.LoadDotEnv()`. Confirme no startup: `telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio` |
+| Nada aparece no Grafana, mas logs vão para stdout | **`.env` não carregado** → lib em modo no-op | O `New()` **deve** chamar `environments.LoadDotEnv()`. Confirme no startup: `telemetry em modo no-op: TELEMETRY_ENDPOINT vazio` |
 | `telemetry iniciado ... Alloy inacessível no startup` | Endpoint não responde (rede/VPN/port-forward) | Valide: `curl -v https://alloy.hellnet.com.br/v1/traces`; use port-forward ou HTTPRoute acessível |
 | Traces/Tempo OK, mas metrics não no Prometheus | Prometheus sem `--web.enable-remote-write-receiver` | Adicione a flag ao args do Prometheus |
-| Profiles não no Pyroscope | Endpoint derivado errado (Alloy com porta ≠ 9999) | Sete `HELLNET_TELEMETRY_PROFILE_ENDPOINT` |
 | `405` ao testar OTLP com curl GET | Normal — OTLP HTTP usa **POST** | Use `curl -X POST` |
 
 ---
@@ -652,13 +652,14 @@ Dois modos, ambos automáticos:
 | `tel.HealthRegister(name, fn)` | Custom health check — ctx **fornecido pela lib** |
 | `tel.MetricsHandler()` | `http.Handler` Prometheus `/metrics` |
 | `tel.WithSpan(name, fn)` | Span (raiz = baseCtx) + erro automático + `exceptions_total` em panic |
+| `tel.Span(ctx, name, fn)` | Span FILHO do ctx do caller + erro automático — superfície para libs instrumentarem DB/Kafka/HTTP |
 | `tel.Trace().Start(ctx, name)` | Escape hatch avançado: span enraizado num ctx próprio |
 | `tel.Meter.Counter/Gauge/Histogram(name)` | Atalhos int64 de métrica |
 | `tel.Log().Info/Error(...)` | Logging estruturado sem ctx (stdout + OTLP) |
 | `tel.Worker(job, fn, extra...)` | Job/worker: span + `worker_*` metrics (ctx vem do baseCtx) |
 | `tel.HTTPClient(opts...)` | `*http.Client` outbound: trace W3C + retry/backoff + métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
-| `tel.Shutdown()` | Flush OTLP + Prometheus |
+| `tel.Close()` | Flush OTLP + Prometheus |
 | `opts.RedactSensitive` / `opts.RedactKeys` | Mascara PII nos logs |
 
 ---

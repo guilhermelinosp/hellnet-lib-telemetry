@@ -14,6 +14,8 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Logger é a abstração de logs (níveis padrão slog, sem Trace).
@@ -142,7 +144,7 @@ func (t *Telemetry) logIn(ctx context.Context, level slog.Level, msg string, arg
 	}
 }
 
-// buildLogger monta o Logger (stdout JSON + OTLP → Loki) com redação e
+// buildLogger monta o Logger (stdout JSON via zap + OTLP → Loki) com redação e
 // enriquecimento de trace_id/span_id, registrando o erro-count handler.
 func (t *Telemetry) buildLogger(o Options, res *sdkresource.Resource) error {
 	lp, err := newLoggerProvider(o, res)
@@ -151,8 +153,8 @@ func (t *Telemetry) buildLogger(o Options, res *sdkresource.Resource) error {
 	}
 	t.lp = lp
 
-	// stdout JSON handler (enriquecido com trace_id/span_id p/ correlação)
-	var stdoutHandler slog.Handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: o.LogLevel})
+	// stdout JSON handler via zap (enriquecido com trace_id/span_id p/ correlação)
+	var stdoutHandler slog.Handler = newZapHandler(o.LogLevel)
 
 	stdoutHandler = contextTraceHandler{stdoutHandler}
 
@@ -164,6 +166,121 @@ func (t *Telemetry) buildLogger(o Options, res *sdkresource.Resource) error {
 	t.Logger = slog.New(newErrorCountHandler(slog.NewMultiHandler(stdoutHandler, otelHandler), t))
 	slog.SetDefault(t.Logger)
 	return nil
+}
+
+// zapHandler adapta um *zap.Logger como slog.Handler, mantendo a superfície
+// pública (Logger) inalterada e delegando a escrita do stdout ao zap (JSON,
+// timestamps e níveis nativos). A correlação trace→log continua sendo feita
+// pelo contextTraceHandler antes deste handler.
+type zapHandler struct {
+	log *zap.Logger
+}
+
+// newZapHandler cria o backend de stdout em JSON via zap, com nível mínimo
+// configurável.
+func newZapHandler(minLevel slog.Level) *zapHandler {
+	var level zapcore.Level
+	switch {
+	case minLevel <= slog.LevelDebug:
+		level = zapcore.DebugLevel
+	case minLevel <= slog.LevelInfo:
+		level = zapcore.InfoLevel
+	case minLevel <= slog.LevelWarn:
+		level = zapcore.WarnLevel
+	default:
+		level = zapcore.ErrorLevel
+	}
+	cfg := zap.NewProductionConfig()
+	cfg.Level = zap.NewAtomicLevelAt(level)
+	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	cfg.EncoderConfig.EncodeLevel = zapcore.LowercaseLevelEncoder
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(cfg.EncoderConfig),
+		zapcore.Lock(os.Stdout),
+		cfg.Level,
+	)
+	// Caller desligado: a cadeia de handlers (errorCount → multi →
+	// contextTrace → zap) tornaria o caller frágil/incorreto; o source real é
+	// enviado pelo otelslog via OTLP.
+	logger := zap.New(core)
+	return &zapHandler{log: logger}
+}
+
+// Enabled reports whether the record level is above the configured threshold.
+func (h *zapHandler) Enabled(_ context.Context, l slog.Level) bool {
+	return h.log.Core().Enabled(levelToZap(l))
+}
+
+// levelToZap maps a slog level to the nearest zapcore level.
+func levelToZap(l slog.Level) zapcore.Level {
+	switch {
+	case l >= slog.LevelError:
+		return zapcore.ErrorLevel
+	case l >= slog.LevelWarn:
+		return zapcore.WarnLevel
+	case l >= slog.LevelInfo:
+		return zapcore.InfoLevel
+	default:
+		return zapcore.DebugLevel
+	}
+}
+
+// Handle writes the slog record to zap.
+func (h *zapHandler) Handle(_ context.Context, r slog.Record) error {
+	fields := make([]zap.Field, 0, r.NumAttrs())
+	r.Attrs(func(a slog.Attr) bool {
+		fields = append(fields, slogAttrToZap(a))
+		return true
+	})
+	msg := r.Message
+	switch levelToZap(r.Level) {
+	case zapcore.DebugLevel:
+		h.log.Debug(msg, fields...)
+	case zapcore.WarnLevel:
+		h.log.Warn(msg, fields...)
+	case zapcore.ErrorLevel:
+		h.log.Error(msg, fields...)
+	default:
+		h.log.Info(msg, fields...)
+	}
+	return nil
+}
+
+// WithAttrs returns a handler with extra attrs attached (used by Logger.With).
+func (h *zapHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	fields := make([]zap.Field, 0, len(attrs))
+	for _, a := range attrs {
+		fields = append(fields, slogAttrToZap(a))
+	}
+	return &zapHandler{log: h.log.With(fields...)}
+}
+
+// WithGroup is a no-op for the zap backend (flat fields).
+func (h *zapHandler) WithGroup(string) slog.Handler { return h }
+
+// slogAttrToZap converts a single slog.Attr into a zap.Field.
+func slogAttrToZap(a slog.Attr) zap.Field {
+	key := a.Key
+	switch v := a.Value.Any().(type) {
+	case string:
+		return zap.String(key, v)
+	case int64:
+		return zap.Int64(key, v)
+	case uint64:
+		return zap.Uint64(key, v)
+	case float64:
+		return zap.Float64(key, v)
+	case bool:
+		return zap.Bool(key, v)
+	case time.Time:
+		return zap.Time(key, v)
+	case time.Duration:
+		return zap.Duration(key, v)
+	case error:
+		return zap.Error(v)
+	default:
+		return zap.Any(key, a.Value.Any())
+	}
 }
 
 // newLoggerProvider cria o LoggerProvider SDK. Endpoint vazio → sem export

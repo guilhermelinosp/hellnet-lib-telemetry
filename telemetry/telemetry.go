@@ -3,7 +3,7 @@
 // Usage (sem parâmetros — a lib lê tudo do ambiente: .env + HELLNET_*):
 //
 //	tel, err := telemetry.New()
-//	defer tel.Shutdown()
+//	defer tel.Close()
 //
 //	// Tracing (no ctx in the API — spans derive from the base context)
 //	err := tel.WithSpan("operation", func(ctx context.Context) error {
@@ -32,6 +32,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -75,10 +76,6 @@ type Telemetry struct {
 	mp *sdkmetric.MeterProvider
 
 	promRegistry *prometheus.Registry
-
-	// profiler é o profiler Pyroscope (push), iniciado via ProfilesStart e
-	// parado em Shutdown.
-	profiler pyroscopeProfiler
 }
 
 // Options configures the Telemetry instance.
@@ -88,6 +85,26 @@ type Options struct {
 	Environment   string
 	LogLevel      slog.Level
 	ResourceAttrs []attribute.KeyValue
+}
+
+// Default returns the default telemetry options.
+func Default() Options {
+	return Options{LogLevel: slog.LevelInfo}
+}
+
+func (o *Options) from(base Options) {
+	o.ServiceName = envString("HELLNET_SERVICE", base.ServiceName)
+	o.OTLPEndpoint = envString("TELEMETRY_ENDPOINT", base.OTLPEndpoint)
+	o.Environment = envString("HELLNET_ENVIRONMENT", base.Environment)
+	o.LogLevel = base.LogLevel
+	o.ResourceAttrs = base.ResourceAttrs
+}
+
+func envString(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }
 
 // Client é a abstração composta dos 3 sinais + lifecycle.
@@ -105,9 +122,14 @@ type Client interface {
 	Log() Logger
 	Trace() Tracer
 	Metric() Meter
-	Shutdown() error
+	Close() error
 	WithSpan(name string, fn func(ctx context.Context) error) error
 	Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
+	// Span cria um span FILHO do ctx fornecido, executa fn e finaliza. Em erro,
+	// marca o span como erro (RecordError + SetStatus). É a superfície ideal
+	// para libs instrumentarem operações concretas (DB, Kafka, HTTP) dentro de
+	// um trace já existente: recebe o ctx do caller e o repassa para fn.
+	Span(ctx context.Context, name string, fn func(ctx context.Context) error) error
 	// Direct logging convenience methods (delegam para Log().*())
 	Error(msg string, args ...any)
 	Warn(msg string, args ...any)
@@ -154,11 +176,12 @@ func otlpSignalURL(base, signalPath string) string {
 // # Sem parâmetros — leitura de ambiente
 //
 // A lib carrega tudo do ambiente: carrega o .env (dev) + lê as envs
-// HELLNET_TELEMETRY_* / HELLNET_* obrigatórias (env-first), sem receber ctx
+// HELLNET_SERVICE / HELLNET_ENVIRONMENT são as únicas envs canônicas globais;
+// TELEMETRY_* contém as configurações específicas de observabilidade.
+// (env-first), sem receber ctx
 // nem Options. Usa context.Background() como contexto-base (baseCtx).
 //
-// Requer HELLNET_TELEMETRY_SERVICE (ou HELLNET_SERVICE) e
-// HELLNET_TELEMETRY_ENDPOINT (ou HELLNET_ENDPOINT) definidos.
+// Requer HELLNET_SERVICE e TELEMETRY_ENDPOINT definidos para exportação.
 func New() (*Telemetry, error) {
 	ctx := context.Background()
 
@@ -168,12 +191,8 @@ func New() (*Telemetry, error) {
 	// erro de parse, cai para as env vars reais do processo.
 	_ = environments.LoadDotEnv()
 
-	o := Options{
-		ServiceName:  environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "SERVICE", ""),
-		OTLPEndpoint: environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "ENDPOINT", ""),
-		Environment:  environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "ENVIRONMENT", ""),
-		LogLevel:     slog.LevelInfo,
-	}
+	o := Default()
+	o.from(o)
 
 	// Build resource with service info
 	resourceAttrs := []attribute.KeyValue{
@@ -216,23 +235,14 @@ func New() (*Telemetry, error) {
 	// conectividade com o Alloy. Evita o cenário de "modo no-op silencioso"
 	// (nada é exportado sem o usuário saber) que já causou confusão.
 	if o.OTLPEndpoint == "" {
-		tel.Logger.Warn("telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio, nada será exportado")
+		tel.Logger.Warn("telemetry em modo no-op: TELEMETRY_ENDPOINT vazio, nada será exportado")
 	} else {
-		tel.Logger.Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "profiling", "auto", "env", o.Environment)
+		tel.Logger.Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "env", o.Environment)
 		// Conectividade do Alloy já é coberta pelo check "otlp-collector"
 		// embutido em runChecks (ver instrumentation.go) — não registrar duplicado.
 		if err := checkOTLPReachable(ctx, o.OTLPEndpoint); err != nil {
 			tel.Logger.Warn("telemetry: Alloy inacessível no startup (dados podem não chegar)",
 				"endpoint", o.OTLPEndpoint, "error", err)
-		}
-	}
-
-	// Profiling push (Pyroscope): inicia automaticamente quando há collector
-	// OTLP configurado. Se não houver endpoint, fica desligado silenciosamente
-	// (não falha o New — profiling é best-effort).
-	if o.OTLPEndpoint != "" {
-		if _, err := tel.ProfilesStart(); err != nil {
-			tel.Logger.Warn("telemetry: profiling não iniciado", "error", err)
 		}
 	}
 
@@ -248,12 +258,12 @@ func MustNew() *Telemetry {
 	return t
 }
 
-// Shutdown flushes telemetry data and cleans up resources. Each provider
+// Close flushes telemetry data and cleans up resources. Each provider
 // (logs/traces/metrics) gets a DEDICATED 5s timeout context and the three
 // shut down IN PARALLEL — one slow/timing-out provider no longer consumes the
 // budget of the others. Errors are aggregated in stable order
 // (logs → traces → metrics). Call with defer when the service terminates.
-func (t *Telemetry) Shutdown() error {
+func (t *Telemetry) Close() error {
 	const shutdownTimeout = 5 * time.Second
 
 	// shutters em ordem estável para a agregação de erros (logs → traces → metrics).
@@ -266,9 +276,6 @@ func (t *Telemetry) Shutdown() error {
 	}
 	if t.mp != nil {
 		shutters = append(shutters, t.mp.Shutdown)
-	}
-	if t.profiler != nil {
-		shutters = append(shutters, func(context.Context) error { return t.profiler.Stop() })
 	}
 
 	// Cada provider desliga em PARALELO com orçamento próprio de 5s; escreve
