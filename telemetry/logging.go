@@ -179,7 +179,7 @@ type zapHandler struct {
 // newZapHandler cria o backend de stdout em JSON via zap, com nível mínimo
 // configurável.
 func newZapHandler(minLevel slog.Level) *zapHandler {
-	level := zapcore.InfoLevel
+	var level zapcore.Level
 	switch {
 	case minLevel <= slog.LevelDebug:
 		level = zapcore.DebugLevel
