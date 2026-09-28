@@ -3,18 +3,14 @@ package telemetry
 import (
 	"context"
 	"math"
-	"net/http"
 	"os"
 	"runtime"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
-	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
@@ -55,40 +51,19 @@ func (a meterAdapter) Histogram(n string) (metric.Int64Histogram, error) {
 // Metric retorna a abstração de metrics (tel.Meter). Nome evita colisão com o campo Meter.
 func (t *Telemetry) Metric() Meter { return t.Meter }
 
-// buildMeter monta o MeterProvider (OTLP + Prometheus), os runtime metrics e
-// as métricas de health check. Runtime metrics sempre ligadas (prometheus-net).
+// buildMeter monta o MeterProvider OTLP, as runtime metrics e as métricas de
+// health check. Não há endpoint local de exposição de métricas.
 func (t *Telemetry) buildMeter(o Options, res *sdkresource.Resource) error {
-	mp, promReg, err := newMeterProvider(o, res)
+	mp, err := newMeterProvider(o, res)
 	if err != nil {
 		return err
 	}
 	t.mp = mp
-	t.promRegistry = promReg
 	t.Meter = meterAdapter{mp.Meter(o.ServiceName)}
 	otel.SetMeterProvider(mp)
 	t.startRuntimeMetrics()
 	t.registerHealthMetrics()
 	return nil
-}
-
-// MetricsHandler returns an http.Handler that serves the library's metrics in
-// Prometheus exposition format (text/plain), for scraping via a /metrics
-// endpoint. O exporter Prometheus vem sempre ligado por padrão. Permite
-// inspecionar as métricas (p99 de latência/worker, CPU, GC, health checks,
-// etc.) sem um collector OTLP — ideal durante testes locais.
-//
-// Exemplo:
-//
-//	mux.Handle("GET /metrics", tel.MetricsHandler())
-//
-// Nota: não pode chamar-se Metric() pois o acessor do meter (Client.Metric()
-// Meter) já ocupa esse nome no conjunto de métodos do Telemetry.
-func (t *Telemetry) MetricsHandler() http.Handler {
-	if t.promRegistry != nil {
-		return promhttp.HandlerFor(t.promRegistry, promhttp.HandlerOpts{})
-	}
-	// Fallback defensivo: /metrics vazio.
-	return promhttp.Handler()
 }
 
 // startRuntimeMetrics registra um conjunto abrangente de métricas de
@@ -252,29 +227,20 @@ func readProcessCPUNs() (int64, error) {
 	return (utime + stime) * nsPerTick, nil
 }
 
-// newMeterProvider cria o MeterProvider SDK com OTLP + Prometheus.
-func newMeterProvider(opts Options, res *sdkresource.Resource) (*sdkmetric.MeterProvider, *prometheus.Registry, error) {
+// newMeterProvider cria o MeterProvider SDK com exportação exclusivamente OTLP.
+func newMeterProvider(opts Options, res *sdkresource.Resource) (*sdkmetric.MeterProvider, error) {
 	readerOpts := []sdkmetric.Option{sdkmetric.WithResource(res)}
 
-	// Endpoint vazio → sem reader OTLP; métricas exportadas só via Prometheus.
+	// Endpoint vazio → sem reader OTLP; métricas ficam apenas no SDK local.
 	if opts.OTLPEndpoint != "" {
 		exporter, err := otlpmetrichttp.New(
 			context.Background(), otlpmetrichttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/metrics")),
 		)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		readerOpts = append(readerOpts, sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)))
 	}
-
-	reg := prometheus.NewRegistry()
-	promExp, err := otelprom.New(otelprom.WithRegisterer(reg))
-	if err != nil {
-		return nil, nil, err
-	}
-	readerOpts = append(readerOpts, sdkmetric.WithReader(promExp))
-	promReg := reg
-
 	mp := sdkmetric.NewMeterProvider(readerOpts...)
-	return mp, promReg, nil
+	return mp, nil
 }

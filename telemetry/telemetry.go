@@ -3,7 +3,7 @@
 // Usage (sem parâmetros — a lib lê tudo do ambiente: .env + HELLNET_*):
 //
 //	tel, err := telemetry.New()
-//	defer tel.Shutdown()
+//	defer tel.Close()
 //
 //	// Tracing (no ctx in the API — spans derive from the base context)
 //	err := tel.WithSpan("operation", func(ctx context.Context) error {
@@ -15,7 +15,7 @@
 //	counter, _ := tel.Meter.Counter("requests.total")
 //	counter.Add(context.Background(), 1)
 //
-//	// Logging (via slog → stdout + OTLP → Loki), correlated with the
+//	// Logging (via Zap → stdout + OTLP → Loki), correlated with the
 //	// base-context trace lineage internally
 //	tel.Log().Info("processing", "id", orderID)
 //
@@ -30,22 +30,23 @@ package telemetry
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/guilhermelinosp/hellnet-lib-environments/environments"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconvv "go.opentelemetry.io/otel/semconv/v1.30.0"
 	"go.opentelemetry.io/otel/trace"
-
-	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Telemetry wraps OpenTelemetry primitives (tracer, meter, logger)
@@ -53,7 +54,7 @@ import (
 type Telemetry struct {
 	Tracer trace.Tracer
 	Meter  Meter
-	Logger *slog.Logger
+	Logger *zap.SugaredLogger
 
 	// baseCtx é o contexto-raiz da aplicação, informado UMA vez em New/MustNew.
 	baseCtx context.Context
@@ -69,25 +70,31 @@ type Telemetry struct {
 
 	healthStatusMu sync.Mutex
 	healthStatus   map[string]int64
+	logMu          sync.Mutex
+	logErrors      metric.Int64Counter
 
 	lp *sdklog.LoggerProvider
 	tp *sdktrace.TracerProvider
 	mp *sdkmetric.MeterProvider
 
-	promRegistry *prometheus.Registry
-
 	// profiler é o profiler Pyroscope (push), iniciado via ProfilesStart e
-	// parado em Shutdown.
+	// parado em Close.
 	profiler pyroscopeProfiler
+
+	shutdownOnce             sync.Once
+	shutdownErr              error
+	includeHealthCheckErrors bool
 }
 
 // Options configures the Telemetry instance.
 type Options struct {
-	ServiceName   string
-	OTLPEndpoint  string
-	Environment   string
-	LogLevel      slog.Level
-	ResourceAttrs []attribute.KeyValue
+	ServiceName              string
+	ServiceVersion           string
+	OTLPEndpoint             string
+	Environment              string
+	LogLevel                 zapcore.Level
+	ResourceAttrs            []attribute.KeyValue
+	IncludeHealthCheckErrors bool
 }
 
 // Client é a abstração composta dos 3 sinais + lifecycle.
@@ -105,9 +112,11 @@ type Client interface {
 	Log() Logger
 	Trace() Tracer
 	Metric() Meter
-	Shutdown() error
+	Close() error
 	WithSpan(name string, fn func(ctx context.Context) error) error
+	Span(ctx context.Context, name string, fn func(ctx context.Context) error) error
 	Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
+	WorkerContext(ctx context.Context, job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
 	// Direct logging convenience methods (delegam para Log().*())
 	Error(msg string, args ...any)
 	Warn(msg string, args ...any)
@@ -160,26 +169,50 @@ func otlpSignalURL(base, signalPath string) string {
 // Requer HELLNET_TELEMETRY_SERVICE (ou HELLNET_SERVICE) e
 // HELLNET_TELEMETRY_ENDPOINT (ou HELLNET_ENDPOINT) definidos.
 func New() (*Telemetry, error) {
-	ctx := context.Background()
-
-	// Env-first: carrega o .env (dev) antes de ler as envs. O GetString apenas
-	// lê os.Getenv; sem LoadDotEnv o .env do working dir nunca é carregado e a
-	// lib roda em modo no-op (nada é exportado). Best-effort: sem .env ou com
-	// erro de parse, cai para as env vars reais do processo.
-	_ = environments.LoadDotEnv()
-
 	o := Options{
-		ServiceName:  environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "SERVICE", ""),
-		OTLPEndpoint: environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "ENDPOINT", ""),
-		Environment:  environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "ENVIRONMENT", ""),
-		LogLevel:     slog.LevelInfo,
+		ServiceName:    envValue("HELLNET_TELEMETRY_SERVICE", "HELLNET_SERVICE", "telemetry"),
+		ServiceVersion: environments.GetString("HELLNET_TELEMETRY_SERVICE_VERSION"),
+		OTLPEndpoint:   envValue("HELLNET_TELEMETRY_ENDPOINT", "HELLNET_ENDPOINT", ""),
+		Environment:    envValue("HELLNET_TELEMETRY_ENVIRONMENT", "HELLNET_ENVIRONMENT", ""),
+		LogLevel:       zapcore.InfoLevel,
+	}
+	return NewWithContext(context.Background(), o)
+}
+
+func envValue(primary, fallback, defaultValue string) string {
+	if value := os.Getenv(primary); value != "" {
+		return value
+	}
+	if value := os.Getenv(fallback); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// NewWithContext creates telemetry with explicit application context and options.
+// New remains the environment-based compatibility entry point.
+func NewWithContext(ctx context.Context, o Options) (*Telemetry, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if o.LogLevel == 0 {
+		o.LogLevel = zapcore.InfoLevel
+	}
+	if o.ServiceName == "" {
+		return nil, errors.New("telemetry: service name is required")
 	}
 
-	// Build resource with service info
+	version := o.ServiceVersion
+	if version == "" {
+		version = "unknown"
+	}
+
 	resourceAttrs := []attribute.KeyValue{
 		semconvv.ServiceNameKey.String(o.ServiceName),
-		semconvv.ServiceVersionKey.String("1.0.0"),
-		attribute.String("deployment.environment", o.Environment),
+		semconvv.ServiceVersionKey.String(version),
+	}
+	if o.Environment != "" {
+		resourceAttrs = append(resourceAttrs, semconvv.DeploymentEnvironmentNameKey.String(o.Environment))
 	}
 
 	resourceAttrs = append(resourceAttrs, o.ResourceAttrs...)
@@ -190,10 +223,11 @@ func New() (*Telemetry, error) {
 	}
 
 	tel := &Telemetry{
-		baseCtx:      ctx,
-		serviceName:  o.ServiceName,
-		otlpEndpoint: o.OTLPEndpoint,
-		environment:  o.Environment,
+		baseCtx:                  ctx,
+		serviceName:              o.ServiceName,
+		otlpEndpoint:             o.OTLPEndpoint,
+		environment:              o.Environment,
+		includeHealthCheckErrors: o.IncludeHealthCheckErrors,
 	}
 
 	// ── Logging / Tracing / Metrics ───────────────────────────────────
@@ -216,13 +250,13 @@ func New() (*Telemetry, error) {
 	// conectividade com o Alloy. Evita o cenário de "modo no-op silencioso"
 	// (nada é exportado sem o usuário saber) que já causou confusão.
 	if o.OTLPEndpoint == "" {
-		tel.Logger.Warn("telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio, nada será exportado")
+		tel.Warn("telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio, nada será exportado")
 	} else {
-		tel.Logger.Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "profiling", "auto", "env", o.Environment)
+		tel.Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "profiling", "auto", "env", o.Environment)
 		// Conectividade do Alloy já é coberta pelo check "otlp-collector"
 		// embutido em runChecks (ver instrumentation.go) — não registrar duplicado.
 		if err := checkOTLPReachable(ctx, o.OTLPEndpoint); err != nil {
-			tel.Logger.Warn("telemetry: Alloy inacessível no startup (dados podem não chegar)",
+			tel.Warn("telemetry: Alloy inacessível no startup (dados podem não chegar)",
 				"endpoint", o.OTLPEndpoint, "error", err)
 		}
 	}
@@ -232,7 +266,7 @@ func New() (*Telemetry, error) {
 	// (não falha o New — profiling é best-effort).
 	if o.OTLPEndpoint != "" {
 		if _, err := tel.ProfilesStart(); err != nil {
-			tel.Logger.Warn("telemetry: profiling não iniciado", "error", err)
+			tel.Warn("telemetry: profiling não iniciado", "error", err)
 		}
 	}
 
@@ -248,54 +282,56 @@ func MustNew() *Telemetry {
 	return t
 }
 
-// Shutdown flushes telemetry data and cleans up resources. Each provider
+// Close flushes telemetry data and cleans up resources. Each provider
 // (logs/traces/metrics) gets a DEDICATED 5s timeout context and the three
 // shut down IN PARALLEL — one slow/timing-out provider no longer consumes the
 // budget of the others. Errors are aggregated in stable order
 // (logs → traces → metrics). Call with defer when the service terminates.
-func (t *Telemetry) Shutdown() error {
-	const shutdownTimeout = 5 * time.Second
+func (t *Telemetry) Close() error {
+	t.shutdownOnce.Do(func() {
+		const shutdownTimeout = 5 * time.Second
 
-	// shutters em ordem estável para a agregação de erros (logs → traces → metrics).
-	var shutters []func(context.Context) error
-	if t.lp != nil {
-		shutters = append(shutters, t.lp.Shutdown)
-	}
-	if t.tp != nil {
-		shutters = append(shutters, t.tp.Shutdown)
-	}
-	if t.mp != nil {
-		shutters = append(shutters, t.mp.Shutdown)
-	}
-	if t.profiler != nil {
-		shutters = append(shutters, func(context.Context) error { return t.profiler.Stop() })
-	}
-
-	// Cada provider desliga em PARALELO com orçamento próprio de 5s; escreve
-	// no slot próprio e lê após Wait (happens-before via WaitGroup).
-	errs := make([]error, len(shutters))
-	var wg sync.WaitGroup
-	for i := range shutters {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-			defer cancel()
-			errs[i] = shutters[i](ctx)
-		}()
-	}
-	wg.Wait()
-
-	var agg []error
-	for _, err := range errs {
-		if err != nil {
-			agg = append(agg, err)
+		// shutters em ordem estável para a agregação de erros (logs → traces → metrics).
+		var shutters []func(context.Context) error
+		if t.lp != nil {
+			shutters = append(shutters, t.lp.Shutdown)
 		}
-	}
-	if len(agg) > 0 {
-		return errors.Join(agg...)
-	}
-	return nil
+		if t.tp != nil {
+			shutters = append(shutters, t.tp.Shutdown)
+		}
+		if t.mp != nil {
+			shutters = append(shutters, t.mp.Shutdown)
+		}
+		if t.profiler != nil {
+			shutters = append(shutters, func(context.Context) error { return t.profiler.Stop() })
+		}
+
+		// Cada provider desliga em PARALELO com orçamento próprio de 5s; escreve
+		// no slot próprio e lê após Wait (happens-before via WaitGroup).
+		errs := make([]error, len(shutters))
+		var wg sync.WaitGroup
+		for i := range shutters {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+				defer cancel()
+				errs[i] = shutters[i](ctx)
+			}()
+		}
+		wg.Wait()
+
+		var agg []error
+		for _, err := range errs {
+			if err != nil {
+				agg = append(agg, err)
+			}
+		}
+		if len(agg) > 0 {
+			t.shutdownErr = errors.Join(agg...)
+		}
+	})
+	return t.shutdownErr
 }
 
 // HealthRegister registra um health check customizado (ex.: DB, redis, downstream).

@@ -3,17 +3,14 @@ package telemetry
 import (
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/pprof"
 	"net/url"
 	"runtime"
 
 	"github.com/grafana/pyroscope-go"
-	"github.com/guilhermelinosp/hellnet-lib-environments/environments"
 )
 
 // pyroscopeProfiler é a minima superfície necessária do profiler Pyroscope para
-// permitir parada no Shutdown sem acoplar telemetry.go à dependência.
+// permitir parada no Close sem acoplar telemetry.go à dependência.
 type pyroscopeProfiler interface {
 	Stop() error
 }
@@ -66,22 +63,22 @@ func deriveProfileEndpoint(base string) (string, error) {
 }
 
 func defaultProfileConfig() profileConfig {
-	endpoint := environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "ENDPOINT", "")
+	endpoint := envValue("HELLNET_TELEMETRY_ENDPOINT", "HELLNET_ENDPOINT", "")
 	addr, _ := deriveProfileEndpoint(endpoint)
 	// Override explícito via HELLNET_TELEMETRY_PROFILE_ENDPOINT (opcional),
 	// útil quando o pyroscope.receive_http do Alloy não usa a porta 9999.
-	if custom := environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "PROFILE_ENDPOINT", ""); custom != "" {
+	if custom := envValue("HELLNET_TELEMETRY_PROFILE_ENDPOINT", "HELLNET_PROFILE_ENDPOINT", ""); custom != "" {
 		addr = custom
 	}
 	return profileConfig{
-		appName:       environments.GetString("HELLNET_TELEMETRY_", "HELLNET_", "SERVICE", "telemetry"),
+		appName:       envValue("HELLNET_TELEMETRY_SERVICE", "HELLNET_SERVICE", "telemetry"),
 		serverAddress: addr,
 	}
 }
 
 // ProfilesStart inicia o profiling contínuo PUSH para o Pyroscope/Alloy.
 // O endpoint é derivado de HELLNET_TELEMETRY_ENDPOINT por padrão (mesmo host do
-// OTLP); use WithProfileServer para override. O profiler para em Shutdown().
+// OTLP); use WithProfileServer para override. O profiler para em Close().
 // Block e mutex profiling vêm SEMPRE habilitados (overhead desprezível em
 // produção) — não é necessário passar options para isso.
 //
@@ -127,25 +124,7 @@ func (t *Telemetry) ProfilesStart(opts ...ProfileOption) (*pyroscope.Profiler, e
 	}
 	t.profiler = prof
 	if t.Logger != nil {
-		t.Logger.Info("telemetry: profiling Pyroscope iniciado", "profileEndpoint", cfg.serverAddress)
+		t.Info("telemetry: profiling Pyroscope iniciado", "profileEndpoint", cfg.serverAddress)
 	}
 	return prof, nil
-}
-
-// ProfilesRegister monta os handlers padrão de net/http/pprof no mux informado,
-// sob /debug/pprof/, habilitando profiling PULL-based (CPU, heap, goroutine,
-// block, mutex, trace). Aponte um scraper (ou `go tool pprof`) para
-// /debug/pprof/ no mesmo mux que serve /metrics.
-//
-// Exemplo:
-//
-//	mux := http.NewServeMux()
-//	tel.MetricsHandler()       // /metrics
-//	tel.ProfilesRegister(mux)  // /debug/pprof/
-func (t *Telemetry) ProfilesRegister(mux *http.ServeMux) {
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 }

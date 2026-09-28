@@ -63,6 +63,23 @@ func (t *Telemetry) WithSpan(name string, fn func(ctx context.Context) error) er
 	return err
 }
 
+// Span starts a span from the caller context. It is the context-first API used
+// by fast-platform-modular services; WithSpan remains for legacy background
+// jobs that have no caller context.
+func (t *Telemetry) Span(ctx context.Context, name string, fn func(ctx context.Context) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	childCtx, span := t.Trace().Start(ctx, name)
+	defer span.End()
+	if err := fn(childCtx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
+}
+
 // currentSpanParent devolve o pai do próximo span criado por runBaseSpan:
 // quando há um span desta lib ativo (topo da pilha de aninhamento), retorna-o
 // (o novo span nasce FILHO dele); caso contrário (ou se o span do topo não é

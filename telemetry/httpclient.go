@@ -3,7 +3,6 @@ package telemetry
 import (
 	"context"
 	"io"
-	"log/slog"
 	"math/rand/v2"
 	"net/http"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
+	"go.uber.org/zap"
 )
 
 // ─────────────── HTTP client instrumentado (outbound) ───────────────
@@ -159,7 +159,7 @@ func WithExtraTransport(rt http.RoundTripper) HTTPOption {
 //     clientMetrics), reusando o meter adapter do Telemetry;
 //   - timeout por tentativa (WithBaseTimeout); o Client não impõe Timeout
 //     global — o prazo total é o ctx passado pelo caller na request;
-//   - log WARN via slog quando TODAS as tentativas falham (correlacionado à
+//   - log WARN via Zap quando TODAS as tentativas falham (correlacionado à
 //     linhagem de ctx da request, via caminho logIn do Telemetry).
 //
 // Exemplo:
@@ -306,12 +306,12 @@ func (rt *clientRetryTransport) RoundTrip(req *http.Request) (*http.Response, er
 	// Log de falha FINAL (todas as tentativas esgotadas), correlacionado ao
 	// ctx da request (herda trace_id da linhagem do caller nos sinks).
 	if res.err != nil {
-		rt.tel.logIn(req.Context(), slog.LevelWarn, "http client request failed",
-			slog.String("method", req.Method),
-			slog.String("host", targetHost(req)),
-			slog.Int("attempts", res.attempts),
-			slog.Duration("duration", time.Since(start)),
-			slog.String("error", res.err.Error()),
+		rt.tel.logIn(req.Context(), zap.WarnLevel, "http client request failed",
+			zap.String("method", req.Method),
+			zap.String("host", targetHost(req)),
+			zap.Int("attempts", res.attempts),
+			zap.Duration("duration", time.Since(start)),
+			zap.String("error", res.err.Error()),
 		)
 	}
 	return res.resp, res.err

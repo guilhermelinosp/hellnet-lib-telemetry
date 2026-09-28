@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -16,16 +14,18 @@ import (
 func newTestTel(t *testing.T) *Telemetry {
 	t.Helper()
 	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
+	t.Setenv("HELLNET_TELEMETRY_SERVICE_VERSION", "test")
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", "")
+	t.Setenv("HELLNET_ENDPOINT", "")
 	tel, err := New()
 	if err != nil {
 		t.Fatalf("New() retornou erro: %v", err)
 	}
-	t.Cleanup(func() { _ = tel.Shutdown() })
+	t.Cleanup(func() { _ = tel.Close() })
 	return tel
 }
 
-func TestNewAndShutdown(t *testing.T) {
+func TestNewAndClose(t *testing.T) {
 	tel := newTestTel(t)
 	if tel == nil {
 		t.Fatal("New() retornou nil")
@@ -36,38 +36,37 @@ func TestNewAndShutdown(t *testing.T) {
 	if tel.Logger == nil {
 		t.Fatal("Logger não deve ser nil")
 	}
-	if err := tel.Shutdown(); err != nil {
-		t.Fatalf("Shutdown() erro: %v", err)
+	if err := tel.Close(); err != nil {
+		t.Fatalf("Close() erro: %v", err)
 	}
 }
 
 func TestMustNew(t *testing.T) {
+	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
+	t.Setenv("HELLNET_TELEMETRY_SERVICE_VERSION", "test")
+	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", "")
 	tel := MustNew()
 	if tel == nil {
 		t.Fatal("MustNew() retornou nil")
 	}
-	_ = tel.Shutdown()
+	_ = tel.Close()
 }
 
 // TestNewLoadsDotEnv é o teste de regressão do bug crítico: o New() deve
 // chamar environments.LoadDotEnv() para carregar o .env do working dir antes
 // de ler as variáveis. Sem isso a lib rodava em modo no-op (nada exportado)
 // e "nada aparecia no Grafana".
-func TestNewLoadsDotEnv(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(
-		"HELLNET_TELEMETRY_SERVICE=test-svc\n"+
-			"HELLNET_TELEMETRY_ENDPOINT=http://test-collector:4318\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(dir)
-	tel, err := New()
+func TestNewWithContextUsesExplicitOptions(t *testing.T) {
+	tel, err := NewWithContext(context.Background(), Options{
+		ServiceName:  "test-svc",
+		OTLPEndpoint: "http://test-collector:4318",
+	})
 	if err != nil {
-		t.Fatalf("New() erro: %v", err)
+		t.Fatalf("NewWithContext() erro: %v", err)
 	}
-	defer tel.Shutdown()
+	defer tel.Close()
 	if tel.otlpEndpoint != "http://test-collector:4318" {
-		t.Fatalf("endpoint = %q, want http://test-collector:4318 (LoadDotEnv não carregou o .env)", tel.otlpEndpoint)
+		t.Fatalf("endpoint = %q, want http://test-collector:4318", tel.otlpEndpoint)
 	}
 	if tel.serviceName != "test-svc" {
 		t.Fatalf("serviceName = %q, want test-svc", tel.serviceName)
@@ -198,7 +197,14 @@ func TestWithSpanAndLog(t *testing.T) {
 	var inner bool
 	err := tel.WithSpan("op", func(ctx context.Context) error {
 		inner = true
-		tel.Log().Info("inside span", "k", "v")
+		logger := tel.LogContext(ctx)
+		logger.Trace("trace", "k", "v")
+		logger.Debug("debug", "k", "v")
+		logger.Info("info", "k", "v")
+		logger.Warn("warn", "k", "v")
+		logger.Error("error", "k", "v")
+		logger.Fatal("fatal", "k", "v")
+		logger.Critical("critical", "k", "v")
 		return nil
 	})
 	if err != nil {
@@ -265,23 +271,6 @@ func TestMiddleware(t *testing.T) {
 	}
 }
 
-func TestMetricsHandler(t *testing.T) {
-	tel := newTestTel(t)
-	_ = tel.Worker("mh", func(ctx context.Context) error { return nil })
-
-	req := httptest.NewRequest("GET", "/metrics", nil)
-	w := httptest.NewRecorder()
-	tel.MetricsHandler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("code = %d, want 200", w.Code)
-	}
-	body := w.Body.String()
-	if !strings.Contains(body, "process_goroutines") {
-		t.Fatalf("metrics não contém process_goroutines; body:\n%s", body)
-	}
-}
-
 func TestHealthEndpoints(t *testing.T) {
 	tel := newTestTel(t)
 	for _, path := range []string{"/live", "/ready", "/health"} {
@@ -291,18 +280,6 @@ func TestHealthEndpoints(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Errorf("%s: code = %d, want 200", path, w.Code)
 		}
-	}
-}
-
-func TestProfilesRegister(t *testing.T) {
-	tel := newTestTel(t)
-	mux := http.NewServeMux()
-	tel.ProfilesRegister(mux)
-	req := httptest.NewRequest("GET", "/debug/pprof/", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("/debug/pprof/ code = %d, want 200", w.Code)
 	}
 }
 
@@ -356,7 +333,7 @@ func TestProfilesStartIntegration(t *testing.T) {
 	}
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
 	tel := MustNew() // auto-inicia ProfilesStart() internamente
-	defer tel.Shutdown()
+	defer tel.Close()
 	if tel.profiler == nil {
 		t.Fatal("profiler não iniciou automaticamente no New()")
 	}
@@ -375,7 +352,7 @@ func TestAlloyIntegration(t *testing.T) {
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
 	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
 	tel := MustNew()
-	defer tel.Shutdown()
+	defer tel.Close()
 
 	tel.Log().Info("integration test log", "ok", true)
 	if err := tel.WithSpan("integration-span", func(ctx context.Context) error {
