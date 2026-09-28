@@ -7,6 +7,7 @@ import (
 	"runtime"
 
 	"github.com/grafana/pyroscope-go"
+	"github.com/guilhermelinosp/hellnet-lib-telemetry/internal/env"
 )
 
 // pyroscopeProfiler é a minima superfície necessária do profiler Pyroscope para
@@ -63,15 +64,16 @@ func deriveProfileEndpoint(base string) (string, error) {
 }
 
 func defaultProfileConfig() profileConfig {
-	endpoint := envValue("HELLNET_TELEMETRY_ENDPOINT", "HELLNET_ENDPOINT", "")
+	prefixes := []string{"HELLNET_TELEMETRY_", "HELLNET_"}
+	endpoint := env.Prefixed(prefixes, "ENDPOINT", "")
 	addr, _ := deriveProfileEndpoint(endpoint)
 	// Override explícito via HELLNET_TELEMETRY_PROFILE_ENDPOINT (opcional),
 	// útil quando o pyroscope.receive_http do Alloy não usa a porta 9999.
-	if custom := envValue("HELLNET_TELEMETRY_PROFILE_ENDPOINT", "HELLNET_PROFILE_ENDPOINT", ""); custom != "" {
+	if custom := env.Prefixed(prefixes, "PROFILE_ENDPOINT", ""); custom != "" {
 		addr = custom
 	}
 	return profileConfig{
-		appName:       envValue("HELLNET_TELEMETRY_SERVICE", "HELLNET_SERVICE", "telemetry"),
+		appName:       env.Prefixed(prefixes, "SERVICE", "telemetry"),
 		serverAddress: addr,
 	}
 }

@@ -25,11 +25,11 @@ import (
 	"context"
 	"errors"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/guilhermelinosp/hellnet-lib-telemetry/internal/env"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -118,12 +118,13 @@ func otlpSignalURL(base, signalPath string) string {
 // Requer HELLNET_TELEMETRY_SERVICE (ou HELLNET_SERVICE) e
 // HELLNET_TELEMETRY_ENDPOINT (ou HELLNET_ENDPOINT) definidos.
 func New() (*Telemetry, error) {
+	prefixes := []string{"HELLNET_TELEMETRY_", "HELLNET_"}
 	o := Options{
-		ServiceName:    envValueAny("telemetry", "HELLNET_TELEMETRY_SERVICE", "HELLNET_SERVICE", "OTEL_SERVICE_NAME"),
-		ServiceVersion: envValueAny(os.Getenv("HELLNET_TELEMETRY_SERVICE_VERSION"), "OTEL_SERVICE_VERSION"),
-		OTLPEndpoint:   envValueAny("", "HELLNET_TELEMETRY_ENDPOINT", "HELLNET_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT"),
-		Environment:    envValueAny("", "HELLNET_TELEMETRY_ENVIRONMENT", "HELLNET_ENVIRONMENT", "OTEL_DEPLOYMENT_ENVIRONMENT"),
-		OTLPHeaders:    parseOTLPHeaders(envValueAny("", "HELLNET_TELEMETRY_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS")),
+		ServiceName:    env.Prefixed(prefixes, "SERVICE", env.String("OTEL_SERVICE_NAME", "telemetry")),
+		ServiceVersion: env.Prefixed(prefixes, "SERVICE_VERSION", env.String("OTEL_SERVICE_VERSION", "")),
+		OTLPEndpoint:   env.Prefixed(prefixes, "ENDPOINT", env.String("OTEL_EXPORTER_OTLP_ENDPOINT", "")),
+		Environment:    env.Prefixed(prefixes, "ENVIRONMENT", env.String("OTEL_DEPLOYMENT_ENVIRONMENT", "")),
+		OTLPHeaders:    parseOTLPHeaders(env.Prefixed(prefixes, "HEADERS", env.String("OTEL_EXPORTER_OTLP_HEADERS", ""))),
 		LogLevel:       zapcore.InfoLevel,
 	}
 	return NewWithContext(context.Background(), o)
@@ -138,25 +139,6 @@ func parseOTLPHeaders(raw string) map[string]string {
 		}
 	}
 	return result
-}
-
-func envValueAny(defaultValue string, keys ...string) string {
-	for _, key := range keys {
-		if value := os.Getenv(key); value != "" {
-			return value
-		}
-	}
-	return defaultValue
-}
-
-func envValue(primary, fallback, defaultValue string) string {
-	if value := os.Getenv(primary); value != "" {
-		return value
-	}
-	if value := os.Getenv(fallback); value != "" {
-		return value
-	}
-	return defaultValue
 }
 
 // NewWithContext creates telemetry with explicit application context and options.

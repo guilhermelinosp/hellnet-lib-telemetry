@@ -3,10 +3,10 @@ package telemetry
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
+	"github.com/guilhermelinosp/hellnet-lib-telemetry/internal/env"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -123,13 +123,13 @@ func newTracerProvider(opts Options, res *sdkresource.Resource) (*sdktrace.Trace
 // configuredSampler honors the standard OTel sampler environment variables.
 // An invalid value returns nil so the SDK keeps its safe default.
 func configuredSampler() sdktrace.Sampler {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER"))) {
+	switch strings.ToLower(strings.TrimSpace(env.String("OTEL_TRACES_SAMPLER", ""))) {
 	case "always_on":
 		return sdktrace.AlwaysSample()
 	case "always_off":
 		return sdktrace.NeverSample()
 	case "traceidratio":
-		ratio, err := strconv.ParseFloat(os.Getenv("OTEL_TRACES_SAMPLER_ARG"), 64)
+		ratio, err := strconv.ParseFloat(env.String("OTEL_TRACES_SAMPLER_ARG", ""), 64)
 		if err == nil && ratio >= 0 && ratio <= 1 {
 			return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
 		}
