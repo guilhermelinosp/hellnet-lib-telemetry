@@ -1,6 +1,6 @@
 // Package telemetry provides opinionated OpenTelemetry observability for Go services.
 //
-// Usage (sem parâmetros — a lib lê tudo do ambiente: .env + HELLNET_*):
+// Usage (sem parâmetros — a lib lê tudo diretamente do ambiente):
 //
 //	tel, err := telemetry.New()
 //	defer tel.Close()
@@ -33,7 +33,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/guilhermelinosp/hellnet-lib-environments/environments"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -159,16 +158,15 @@ func otlpSignalURL(base, signalPath string) string {
 //
 // # Sem parâmetros — leitura de ambiente
 //
-// A lib carrega tudo do ambiente: carrega o .env (dev) + lê as envs
-// HELLNET_TELEMETRY_* / HELLNET_* obrigatórias (env-first), sem receber ctx
-// nem Options. Usa context.Background() como contexto-base (baseCtx).
+// A lib lê diretamente as envs HELLNET_TELEMETRY_*, HELLNET_* e OTEL_*, sem
+// carregar arquivos .env ou depender de uma biblioteca externa de ambiente.
 //
 // Requer HELLNET_TELEMETRY_SERVICE (ou HELLNET_SERVICE) e
 // HELLNET_TELEMETRY_ENDPOINT (ou HELLNET_ENDPOINT) definidos.
 func New() (*Telemetry, error) {
 	o := Options{
 		ServiceName:    envValueAny("telemetry", "HELLNET_TELEMETRY_SERVICE", "HELLNET_SERVICE", "OTEL_SERVICE_NAME"),
-		ServiceVersion: envValueAny(environments.GetString("HELLNET_TELEMETRY_SERVICE_VERSION"), "OTEL_SERVICE_VERSION"),
+		ServiceVersion: envValueAny(os.Getenv("HELLNET_TELEMETRY_SERVICE_VERSION"), "OTEL_SERVICE_VERSION"),
 		OTLPEndpoint:   envValueAny("", "HELLNET_TELEMETRY_ENDPOINT", "HELLNET_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT"),
 		Environment:    envValueAny("", "HELLNET_TELEMETRY_ENVIRONMENT", "HELLNET_ENVIRONMENT", "OTEL_DEPLOYMENT_ENVIRONMENT"),
 		OTLPHeaders:    parseOTLPHeaders(envValueAny("", "HELLNET_TELEMETRY_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS")),
