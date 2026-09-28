@@ -31,7 +31,7 @@ func TestNewAndClose(t *testing.T) {
 	if tel == nil {
 		t.Fatal("New() retornou nil")
 	}
-	if tel.Meter == nil {
+	if tel.meter == nil {
 		t.Fatal("Meter não deve ser nil")
 	}
 	if tel.Logger == nil {
@@ -194,9 +194,9 @@ func TestParseOTLPEndpoint(t *testing.T) {
 func TestWithSpanAndLog(t *testing.T) {
 	tel := newTestTel(t)
 	var inner bool
-	err := tel.WithSpan("op", func(ctx context.Context) error {
+	err := tel.Trace(context.Background()).Span("op", func(ctx context.Context) error {
 		inner = true
-		logger := tel.LogContext(ctx)
+		logger := tel.Log(ctx)
 		logger.Trace("trace", "k", "v")
 		logger.Debug("debug", "k", "v")
 		logger.Info("info", "k", "v")
@@ -217,7 +217,7 @@ func TestWithSpanAndLog(t *testing.T) {
 func TestWithSpanContextPreservesParent(t *testing.T) {
 	tel := newTestTel(t)
 	parent := context.WithValue(context.Background(), struct{}{}, "parent")
-	if err := tel.WithSpanContext(parent, "context-op", func(ctx context.Context) error {
+	if err := tel.Trace(parent).Span("context-op", func(ctx context.Context) error {
 		if got := ctx.Value(struct{}{}); got != "parent" {
 			t.Fatalf("parent context value = %v, want parent", got)
 		}
@@ -268,7 +268,7 @@ func TestWithSpanPanic(t *testing.T) {
 			t.Fatal("esperado panic re-propagado")
 		}
 	}()
-	_ = tel.WithSpan("op", func(ctx context.Context) error {
+	_ = tel.Trace(context.Background()).Span("op", func(ctx context.Context) error {
 		panic("boom")
 	})
 }
@@ -276,7 +276,7 @@ func TestWithSpanPanic(t *testing.T) {
 func TestWorker(t *testing.T) {
 	tel := newTestTel(t)
 	called := false
-	err := tel.Worker("job", func(ctx context.Context) error {
+	err := tel.WorkerContext(context.Background(), "job", func(ctx context.Context) error {
 		called = true
 		return nil
 	})
@@ -291,7 +291,7 @@ func TestWorker(t *testing.T) {
 func TestWorkerError(t *testing.T) {
 	tel := newTestTel(t)
 	want := context.DeadlineExceeded
-	err := tel.Worker("job", func(ctx context.Context) error {
+	err := tel.WorkerContext(context.Background(), "job", func(ctx context.Context) error {
 		return want
 	})
 	if err != want {
@@ -401,13 +401,8 @@ func TestAlloyIntegration(t *testing.T) {
 	defer tel.Close()
 
 	tel.Log().Info("integration test log", "ok", true)
-	if err := tel.WithSpan("integration-span", func(ctx context.Context) error {
-		c, err := tel.Meter.Counter("integration_test_total")
-		if err != nil {
-			return err
-		}
-		c.Add(ctx, 1)
-		return nil
+	if err := tel.Trace(context.Background()).Span("integration-span", func(ctx context.Context) error {
+		return tel.Counter(ctx, "integration_test_total", 1)
 	}); err != nil {
 		t.Fatalf("WithSpan erro: %v", err)
 	}

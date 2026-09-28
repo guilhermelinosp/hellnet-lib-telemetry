@@ -5,23 +5,20 @@
 //	tel, err := telemetry.New()
 //	defer tel.Close()
 //
-//	// Tracing (context-first; WithSpan remains a compatibility helper)
-//	err := tel.WithSpan("operation", func(ctx context.Context) error {
+//	// Tracing (context-first)
+//	err := tel.Trace(context.Background()).Span("operation", func(ctx context.Context) error {
 //		span := trace.SpanFromContext(ctx) // continues this span
 //		return doWork(ctx)
 //	})
 //
 //	// Metrics
-//	counter, _ := tel.Meter.Counter("requests.total")
-//	counter.Add(context.Background(), 1)
+//	_ = tel.Metric(context.Background()).Counter("requests.total", 1)
 //
 //	// Logging (via Zap → stdout + OTLP → Loki), correlated with the
 //	// base-context trace lineage internally
 //	tel.Log().Info("processing", "id", orderID)
 //
-// Context-first operations preserve the caller's distributed trace. The
-// context-free WithSpan/Worker helpers remain for background jobs with no
-// incoming context.
+// Context-first operations preserve the caller's distributed trace.
 package telemetry
 
 import (
@@ -91,49 +88,6 @@ type Options struct {
 	OTLPHeaders              map[string]string
 	IncludeHealthCheckErrors bool
 }
-
-// Client é a abstração composta dos 3 sinais + lifecycle.
-// Use para injeção de dependência e testes:
-//
-//	var c telemetry.Client = tel
-//	c.Meter.Counter("req_total")        // int64 (atalho)
-//	c.Meter.Float64Histogram("lat_s")   // float (superfície crua)
-//	c.WithSpan("op", func(ctx context.Context) error { ... })
-//	c.Error("boom", "err", err)         // log direto
-//	c.Warn("slow", "latency", dur)      // log direto
-//	c.Info("started", "port", port)     // log direto
-//	c.Debug("debug", "detail", val)     // log direto
-type Client interface {
-	Log() Logger
-	Trace() Tracer
-	Metric() Meter
-	Close() error
-	WithSpan(name string, fn func(ctx context.Context) error) error
-	WithSpanContext(ctx context.Context, name string, fn func(ctx context.Context) error) error
-	Span(ctx context.Context, name string, fn func(ctx context.Context) error) error
-	Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
-	WorkerContext(ctx context.Context, job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
-	// Direct logging convenience methods (delegam para Log().*())
-	Error(msg string, args ...any)
-	Warn(msg string, args ...any)
-	Info(msg string, args ...any)
-	Debug(msg string, args ...any)
-
-	// Counter incrementa um contador int64 (atalho: cria/obtém + Add em uma chamada).
-	Counter(ctx context.Context, name string, value int64) error
-
-	// Gauge grava um valor em um gauge int64 (atalho: cria/obtém + Record em uma chamada).
-	Gauge(ctx context.Context, name string, value int64) error
-
-	// Histogram grava um valor em um histograma int64 (atalho: cria/obtém + Record em uma chamada).
-	Histogram(ctx context.Context, name string, value int64) error
-
-	// Duration grava uma duração em segundos em um histograma float64 (atalho: cria/obtém + Record em uma chamada).
-	Duration(ctx context.Context, name string, value float64) error
-}
-
-// Compile-time: *Telemetry satisfaz Client.
-var _ Client = (*Telemetry)(nil)
 
 // otlpSignalURL retorna a URL completa de um sinal OTLP (traces/metrics/logs)
 // anexando o path do signal quando o ENDPOINT base não traz path. Versões
@@ -266,13 +220,13 @@ func NewWithContext(ctx context.Context, o Options) (*Telemetry, error) {
 	// conectividade com o Alloy. Evita o cenário de "modo no-op silencioso"
 	// (nada é exportado sem o usuário saber) que já causou confusão.
 	if o.OTLPEndpoint == "" {
-		tel.Warn("telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio, nada será exportado")
+		tel.Log(ctx).Warn("telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio, nada será exportado")
 	} else {
-		tel.Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "profiling", "auto", "env", o.Environment)
+		tel.Log(ctx).Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "profiling", "auto", "env", o.Environment)
 		// Conectividade do Alloy já é coberta pelo check "otlp-collector"
 		// embutido em runChecks (ver instrumentation.go) — não registrar duplicado.
 		if err := checkOTLPReachable(ctx, o.OTLPEndpoint); err != nil {
-			tel.Warn("telemetry: Alloy inacessível no startup (dados podem não chegar)",
+			tel.Log(ctx).Warn("telemetry: Alloy inacessível no startup (dados podem não chegar)",
 				"endpoint", o.OTLPEndpoint, "error", err)
 		}
 	}
@@ -282,7 +236,7 @@ func NewWithContext(ctx context.Context, o Options) (*Telemetry, error) {
 	// (não falha o New — profiling é best-effort).
 	if o.OTLPEndpoint != "" {
 		if _, err := tel.ProfilesStart(); err != nil {
-			tel.Warn("telemetry: profiling não iniciado", "error", err)
+			tel.Log(ctx).Warn("telemetry: profiling não iniciado", "error", err)
 		}
 	}
 

@@ -31,7 +31,7 @@ import (
 //	client.Transport = clientRetryTransport{next: otelhttp.NewTransport(inner)}
 //
 // O contexto usado nas tentativas deriva de req.Context() (linhagem que o
-// caller tiver — ex.: filho do span atual dentro de WithSpan). NÃO há prazo
+// caller tiver — ex.: filho do span atual dentro de Trace(ctx).Span). NÃO há prazo
 // total derivado do baseCtx deliberadamente: quem chama controla o ciclo via
 // ctx próprio da request.
 
@@ -165,7 +165,7 @@ func WithExtraTransport(rt http.RoundTripper) HTTPOption {
 // Exemplo:
 //
 //	client := tel.HTTPClient(telemetry.WithBaseTimeout(5*time.Second))
-//	err := tel.WithSpan("sync-upstream", func(ctx context.Context) error {
+//	err := tel.Trace(ctx).Span("sync-upstream", func(ctx context.Context) error {
 //		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 //		resp, err := client.Do(req) // traz traceparent automaticamente
 //		if err != nil {
@@ -206,7 +206,7 @@ func (t *Telemetry) HTTPClient(opts ...HTTPOption) *http.Client {
 		Transport: &clientRetryTransport{
 			next: otelhttp.NewTransport(inner, httpOpts...),
 			cfg:  cfg,
-			m:    newClientMetrics(t.Meter),
+			m:    newClientMetrics(t.meter),
 			tel:  t,
 		},
 	}

@@ -128,10 +128,10 @@ Prefira APIs context-first para preservar a linhagem distribuída. As variantes
 sem contexto continuam disponíveis para jobs sem contexto de entrada:
 
 ```go
-err := tel.WithSpanContext(ctx, "process-order", func(ctx context.Context) error {
+err := tel.Trace(ctx).Span("process-order", func(ctx context.Context) error {
 	return process(ctx, order)
 })
-tel.LogContext(ctx).Info("processing")
+tel.Log(ctx).Info("processing")
 err = tel.WorkerContext(ctx, "reconcile", run)
 ```
 
@@ -201,7 +201,7 @@ Métricas produzidas: `healthcheck_status{check,status}`,
 Fluxo recomendado (context-first):
 
 ```go
-err := tel.WithSpanContext(ctx, "process-order", func(ctx context.Context) error {
+err := tel.Trace(ctx).Span("process-order", func(ctx context.Context) error {
 	// ctx contém o span; código otel-instrumentado continua a linhagem
 	return process(ctx, order)
 })
@@ -218,12 +218,9 @@ Precisa enraizar um span num ctx próprio? Use a superfície explícita com ctx
 (documentada como interna/avançada; fora do fluxo padrão de correlação):
 
 ```go
-ctx, span := tel.RawTrace().Start(parentCtx, "operation-name",
-	trace.WithAttributes(attribute.String("order.id", "123")))
-defer span.End()
-
-span.AddEvent("validation-started")
-span.SetAttributes(attribute.Int("items.count", 5))
+err := tel.Trace(parentCtx).Span("operation-name", func(ctx context.Context) error {
+	return validate(ctx)
+})
 ```
 
 ---
@@ -411,10 +408,10 @@ bootstrap da aplicação decide quando terminar.
 Para preservar correlação em código request-scoped, use:
 
 ```go
-tel.LogContext(ctx).Error("request failed", "error", err)
+tel.Log(ctx).Error("request failed", "error", err)
 ```
 
-`Log()` usa contexto-base. `LogContext(ctx)` preserva correlação request-scoped.
+`Log(ctx)` preserva a correlação request-scoped.
 `tel.Logger` é um `*zap.SugaredLogger`.
 
 **stdout:**
@@ -484,7 +481,7 @@ client := tel.HTTPClient(
 	telemetry.WithMaxRetries(2),
 )
 
-err := tel.WithSpan("sync-upstream", func(ctx context.Context) error {
+err := tel.Trace(ctx).Span("sync-upstream", func(ctx context.Context) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
 		"https://api.example.com/orders", nil)
 	resp, err := client.Do(req) // traz traceparent automaticamente
@@ -562,7 +559,7 @@ operação`. A aplicação decide o fallback e a classificação de erros; a lib
 não repete automaticamente erros de negócio.
 
 ```go
-err := tel.Worker("process_order",
+err := tel.WorkerContext(ctx, "process_order",
 	func(ctx context.Context) error {
 		return process(ctx, msg)
 	},
@@ -604,39 +601,21 @@ defer tel.Close() // timeout interno de 5s; força flush OTLP
 
 ---
 
-## Abstração (`Client` interface)
+## API principal
 
-Para DI/mock, use a abstração em vez dos campos crus. O tipo **não aparece no
-nome do método** — `int64`/`float64` é resolvido no acessor (`Int64()`/`Float64()`)
-e os métodos são `Counter`/`Gauge`/`Histogram` agnósticos (genéricos).
+Use o contexto da operação diretamente nas três fachadas:
 
 ```go
-var c telemetry.Client = tel
+logger := tel.Log(ctx)
+metric := tel.Metric(ctx)
+trace := tel.Trace(ctx)
 
-// Metrics — tel.Metric(ctx) expõe atalhos context-aware
-// + toda a superfície crua de metric.Meter (Float64*, Observable*, RegisterCallback).
-counter := c.Metric(ctx).Counter("req_total", 1)
-counter.Add(ctx, 1)
-c.Metric(ctx).Gauge("queue", int64(q))
-c.Metric(ctx).Histogram("latency", d.Seconds())
-
-// também direto no tel (sem passar pelo Client):
-tel.Metric(ctx).Counter("hellnet_smoke_ops_total", 1)
-
-// Traces (escape hatch avançado; fluxo padrão é tel.WithSpan)
-err := c.Trace(parentCtx).Span("order", func(ctx context.Context) error {
-	return nil
+logger.Info("started")
+metric.Counter("requests", 1)
+trace.Span("operation", func(ctx context.Context) error {
+	return process(ctx)
 })
-_ = err
-defer span.End()
-
-// Logs (níveis Zap, sem ctx — correlação via contexto-base)
-c.Log().Error("boom", "err", err)
-c.Log().Info("started")
 ```
-
-`*Telemetry` já satisfaz `telemetry.Client` (non-breaking). Quando metrics/logging/
-tracing estão desligados, os acessores retornam implementações noop (nunca `nil`).
 
 ---
 
@@ -675,13 +654,10 @@ O profiling usa somente push para Pyroscope:
 | `telemetry.Middleware(tel, handler)` | HTTP tracing + request metrics + logging (request-scoped) |
 | `tel.Live()` / `tel.Ready()` / `tel.Health()` | Health probes (`http.Handler`) |
 | `tel.HealthRegister(name, fn)` | Custom health check — ctx **fornecido pela lib** |
-| `tel.WithSpan(name, fn)` | Span de compatibilidade para jobs sem contexto + erro automático |
-| `tel.WithSpanContext(ctx, name, fn)` / `tel.Span(ctx, name, fn)` | Span filho do contexto recebido |
 | `tel.Trace(ctx).Span(name, fn)` | Span de aplicação context-aware |
-| `tel.RawTrace().Start(ctx, name)` | Escape hatch avançado de OTel |
 | `tel.Metric(ctx).Counter/Gauge/Histogram(name, value)` | Atalhos context-aware |
-| `tel.Log().Trace/Debug/Info/Warn/Error/Fatal/Critical(...)` | Logging estruturado (stdout + OTLP) |
-| `tel.Worker(job, fn, extra...)` | Job/worker de compatibilidade sem contexto |
+| `tel.Log(ctx).Trace/Debug/Info/Warn/Error/Fatal/Critical(...)` | Logging estruturado (stdout + OTLP) |
+| `tel.WorkerContext(ctx, job, fn, extra...)` | Worker com contexto explícito |
 | `tel.HTTPClient(opts...)` | `*http.Client` outbound: trace W3C + retry/backoff + métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
 | `tel.Close()` | Flush OTLP |

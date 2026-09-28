@@ -23,6 +23,16 @@ type Tracer interface {
 	Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span)
 }
 
+type ContextTracer struct {
+	tel *Telemetry
+	ctx context.Context
+}
+
+func (t ContextTracer) Span(name string, fn func(ctx context.Context) error) error {
+	_, err := t.tel.runSpan(t.ctx, name, fn)
+	return err
+}
+
 // buildTracer monta o TracerProvider e o propagador de contexto (sempre registrado globalmente).
 func (t *Telemetry) buildTracer(o Options, res *sdkresource.Resource) error {
 	tp, err := newTracerProvider(o, res)
@@ -30,35 +40,10 @@ func (t *Telemetry) buildTracer(o Options, res *sdkresource.Resource) error {
 		return err
 	}
 	t.tp = tp
-	t.Tracer = tp.Tracer(o.ServiceName)
+	t.tracer = tp.Tracer(o.ServiceName)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	return nil
-}
-
-// WithSpan cria um span, executa fn e finaliza. Em erro, marca o span com o
-// status. O ctx derivado (contendo o span) é repassado para fn, permitindo que
-// código otel-instrumentado mais a fundo continue a linhagem.
-//
-// WithSpan é a API de compatibilidade para jobs sem contexto de entrada.
-// Para requests, consumers e jobs derivados de outra operação, use
-// WithSpanContext ou Span para preservar a linhagem distribuída.
-func (t *Telemetry) WithSpan(name string, fn func(ctx context.Context) error) error {
-	return t.WithSpanContext(t.baseCtx, name, fn)
-}
-
-// WithSpanContext cria um span filho do contexto recebido. Esta é a API
-// context-first recomendada para instrumentar operações de aplicação.
-func (t *Telemetry) WithSpanContext(ctx context.Context, name string, fn func(ctx context.Context) error) error {
-	return t.Span(ctx, name, fn)
-}
-
-// Span starts a span from the caller context. It is the context-first API used
-// by fast-platform-modular services; WithSpan remains for legacy background
-// jobs that have no caller context.
-func (t *Telemetry) Span(ctx context.Context, name string, fn func(ctx context.Context) error) error {
-	_, err := t.runSpan(ctx, name, fn)
-	return err
 }
 
 // runSpan centraliza o ciclo de vida de um span de aplicação, repassa o ctx
@@ -69,14 +54,14 @@ func (t *Telemetry) runSpan(parent context.Context, name string, fn func(ctx con
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, span := t.Trace().Start(parent, name)
+	ctx, span := t.rawTrace().Start(parent, name)
 	defer func() {
 		// Recupera panics automaticamente, contabilizando exceções
 		// (exceptions_total) e marcando o span como erro, preservando o
 		// comportamento original ao re-propagar o panic.
 		if r := recover(); r != nil {
-			if t.Meter != nil {
-				if c, err := t.Meter.Counter("exceptions_total"); err == nil {
+			if t.meter != nil {
+				if c, err := t.meter.Counter("exceptions_total"); err == nil {
 					c.Add(ctx, 1, metric.WithAttributes(attribute.String("span", name), attribute.String("kind", "panic")))
 				}
 			}
@@ -97,11 +82,19 @@ func (t *Telemetry) runSpan(parent context.Context, name string, fn func(ctx con
 // Trace retorna a abstração de traces. Nome evita colisão com o campo exportado Tracer.
 //
 // Use o contexto recebido pelo caller para preservar a linhagem distribuída.
-func (t *Telemetry) Trace() Tracer {
-	if t.Tracer == nil {
+func (t *Telemetry) Trace(contexts ...context.Context) ContextTracer {
+	ctx := t.baseCtx
+	if len(contexts) > 0 && contexts[0] != nil {
+		ctx = contexts[0]
+	}
+	return ContextTracer{tel: t, ctx: ctx}
+}
+
+func (t *Telemetry) rawTrace() Tracer {
+	if t.tracer == nil {
 		return otel.Tracer(t.serviceName)
 	}
-	return t.Tracer
+	return t.tracer
 }
 
 // newTracerProvider cria o TracerProvider SDK. Endpoint vazio → sem export OTLP.

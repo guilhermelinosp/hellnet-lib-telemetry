@@ -185,7 +185,7 @@ func (t *Telemetry) recordHealthCheck(ctx context.Context, name string, fn func(
 
 	// t.Meter pode ser nil quando o Telemetry é construído manualmente sem New
 	// (ex.: testes de health que só checam JSON). Nesse caso, pula as métricas.
-	if t.Meter != nil {
+	if t.meter != nil {
 		// healthcheck_status é um Int64ObservableGauge (callback) que lê este
 		// mapa no export — exportação confiável em OTLP.
 		if t.healthStatus != nil {
@@ -193,7 +193,7 @@ func (t *Telemetry) recordHealthCheck(ctx context.Context, name string, fn func(
 			t.healthStatus[name] = val
 			t.healthStatusMu.Unlock()
 		}
-		if h, herr := t.Meter.Float64Histogram("healthcheck_duration_seconds",
+		if h, herr := t.meter.Float64Histogram("healthcheck_duration_seconds",
 			metric.WithExplicitBucketBoundaries(healthCheckDurationBoundaries...),
 			metric.WithUnit("s"),
 			metric.WithDescription("Duração de cada health check"),
@@ -210,17 +210,17 @@ func (t *Telemetry) recordHealthCheck(ctx context.Context, name string, fn func(
 // Gauge síncrono exportado pelo SDK OTLP.
 // com atributo de forma consistente, ao contrário dos observables (ex.: process_*).
 func (t *Telemetry) registerHealthMetrics() {
-	if t.Meter == nil {
+	if t.meter == nil {
 		return
 	}
 	t.healthStatus = map[string]int64{}
-	g, err := t.Meter.Int64ObservableGauge("healthcheck_status",
+	g, err := t.meter.Int64ObservableGauge("healthcheck_status",
 		metric.WithDescription("Health check status (1=pass, 0=fail) por check"),
 	)
 	if err != nil {
 		return
 	}
-	_, _ = t.Meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+	_, _ = t.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		t.healthStatusMu.Lock()
 		defer t.healthStatusMu.Unlock()
 		for name, v := range t.healthStatus {
@@ -276,8 +276,8 @@ func (t *Telemetry) runChecks(ctx context.Context, includeCollector bool) ([]Che
 	}
 
 	// healthcheck_all_pass: gauge 0/1 do estado agregado.
-	if t.Meter != nil {
-		if g, gerr := t.Meter.Gauge("healthcheck_all_pass"); gerr == nil {
+	if t.meter != nil {
+		if g, gerr := t.meter.Gauge("healthcheck_all_pass"); gerr == nil {
 			v := int64(1)
 			if !allPass {
 				v = 0
@@ -371,27 +371,27 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 	opts = append(opts, otelhttp.WithMeterProvider(noop.NewMeterProvider()))
 
 	// Instrumentações de request criados uma única vez.
-	reqCount, _ := tel.Meter.Counter("http_requests_total")
-	reqDuration, _ := tel.Meter.Float64Histogram("http_request_duration_seconds",
+	reqCount, _ := tel.meter.Counter("http_requests_total")
+	reqDuration, _ := tel.meter.Float64Histogram("http_request_duration_seconds",
 		metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...),
 		metric.WithUnit("s"),
 		metric.WithDescription("Duração de requests HTTP em segundos"),
 	)
 	// UpDownCounter é o instrumento correto para concorrência (inflight).
-	reqInflight, _ := tel.Meter.Int64UpDownCounter("http_requests_inflight")
-	respSize, _ := tel.Meter.Float64Histogram("http_response_size_bytes",
+	reqInflight, _ := tel.meter.Int64UpDownCounter("http_requests_inflight")
+	respSize, _ := tel.meter.Float64Histogram("http_response_size_bytes",
 		metric.WithExplicitBucketBoundaries(httpResponseSizeBoundaries...),
 		metric.WithUnit("By"),
 		metric.WithDescription("Tamanho da resposta HTTP em bytes"),
 	)
 	// Tamanho do corpo da requisição (via ContentLength; não consome o body).
-	reqBodySize, _ := tel.Meter.Float64Histogram("http_requests_body_size_bytes",
+	reqBodySize, _ := tel.meter.Float64Histogram("http_requests_body_size_bytes",
 		metric.WithExplicitBucketBoundaries(requestBodySizeBoundaries...),
 		metric.WithUnit("By"),
 		metric.WithDescription("Tamanho do corpo da requisição HTTP em bytes"),
 	)
 	// Erros HTTP (status >= 400) — sinal de taxa de erro automática no server.
-	reqErrors, _ := tel.Meter.Counter("http_server_errors_total")
+	reqErrors, _ := tel.meter.Counter("http_server_errors_total")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -515,22 +515,17 @@ var latencyBucketBoundaries = []float64{
 // re-propagado (paridade com WithSpan; métricas/log pós-execução não são
 // emitidos). O erro de fn é repassado (não tratado), então o caller decide
 // retry/backoff. extra permite atributos adicionais (fila, partition, tenant).
-func (t *Telemetry) Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error {
-	return t.WorkerContext(t.baseCtx, job, fn, extra...)
-}
-
 // WorkerContext preserves an existing request/consumer trace as the parent of
-// the worker span. Worker remains the compatibility API for root background
-// jobs.
+// the worker span.
 func (t *Telemetry) WorkerContext(parent context.Context, job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error {
 	if parent == nil {
 		parent = t.baseCtx
 	}
-	jobsTotal, _ := t.Meter.Counter("worker_jobs_total")
-	jobDur, _ := t.Meter.Float64Histogram("worker_job_duration_seconds", metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...), metric.WithUnit("s"), metric.WithDescription("Duração de execução de jobs/workers em segundos"))
+	jobsTotal, _ := t.meter.Counter("worker_jobs_total")
+	jobDur, _ := t.meter.Float64Histogram("worker_job_duration_seconds", metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...), metric.WithUnit("s"), metric.WithDescription("Duração de execução de jobs/workers em segundos"))
 	// UpDownCounter é o instrumento correto para concorrência (inflight):
 	// permite Add/Sub de delta, diferente de Gauge (Record de valor absoluto).
-	inflight, _ := t.Meter.Int64UpDownCounter("worker_jobs_inflight")
+	inflight, _ := t.meter.Int64UpDownCounter("worker_jobs_inflight")
 
 	baseAttrs := append([]attribute.KeyValue{attribute.String("job", job)}, extra...)
 	withStatus := func(status string) []attribute.KeyValue {
@@ -543,11 +538,11 @@ func (t *Telemetry) WorkerContext(parent context.Context, job string, fn func(ct
 	}
 
 	start := time.Now()
-	spanCtx, span := t.Trace().Start(parent, job)
+	spanCtx, span := t.rawTrace().Start(parent, job)
 	defer span.End()
 	defer func() {
 		if r := recover(); r != nil {
-			if c, metricErr := t.Meter.Counter("exceptions_total"); metricErr == nil {
+			if c, metricErr := t.meter.Counter("exceptions_total"); metricErr == nil {
 				c.Add(spanCtx, 1, metric.WithAttributes(attribute.String("span", job), attribute.String("kind", "panic")))
 			}
 			span.RecordError(fmt.Errorf("%v", r))
@@ -640,7 +635,7 @@ func readThreads() (int64, error) {
 // próprias, acompanhando o ciclo do OTLP. Paridade com as métricas
 // de pool do SqlClient (ao nível do pool).
 func (t *Telemetry) WatchDB(db *sql.DB, name string) {
-	m := t.Meter
+	m := t.meter
 	openConns, _ := m.Int64ObservableGauge("db_sql_open_connections",
 		metric.WithDescription("Number of open connections in the pool"))
 	inUse, _ := m.Int64ObservableGauge("db_sql_in_use_connections",

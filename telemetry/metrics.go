@@ -48,8 +48,30 @@ func (a meterAdapter) Histogram(n string) (metric.Int64Histogram, error) {
 	return a.Int64Histogram(n)
 }
 
-// Metric retorna a abstração de metrics (tel.Meter). Nome evita colisão com o campo Meter.
-func (t *Telemetry) Metric() Meter { return t.Meter }
+type ContextMeter struct {
+	tel *Telemetry
+	ctx context.Context
+}
+
+func (m ContextMeter) Counter(name string, value int64) error {
+	return m.tel.Counter(m.ctx, name, value)
+}
+
+func (m ContextMeter) Gauge(name string, value int64) error {
+	return m.tel.Gauge(m.ctx, name, value)
+}
+
+func (m ContextMeter) Histogram(name string, value float64) error {
+	return m.tel.Duration(m.ctx, name, value)
+}
+
+func (t *Telemetry) Metric(contexts ...context.Context) ContextMeter {
+	ctx := t.baseCtx
+	if len(contexts) > 0 && contexts[0] != nil {
+		ctx = contexts[0]
+	}
+	return ContextMeter{tel: t, ctx: ctx}
+}
 
 // buildMeter monta o MeterProvider OTLP, as runtime metrics e as métricas de
 // health check. Não há endpoint local de exposição de métricas.
@@ -59,7 +81,7 @@ func (t *Telemetry) buildMeter(o Options, res *sdkresource.Resource) error {
 		return err
 	}
 	t.mp = mp
-	t.Meter = meterAdapter{mp.Meter(o.ServiceName)}
+	t.meter = meterAdapter{mp.Meter(o.ServiceName)}
 	otel.SetMeterProvider(mp)
 	t.startRuntimeMetrics()
 	t.registerHealthMetrics()
@@ -76,7 +98,7 @@ func (t *Telemetry) buildMeter(o Options, res *sdkresource.Resource) error {
 // pausa individual (→ p99 da pausa de GC). CPU: uso do processo (% e razão).
 // Além de goroutines, num_cpu e uptime.
 func (t *Telemetry) startRuntimeMetrics() {
-	m := t.Meter
+	m := t.meter
 
 	goroutines, _ := m.Int64ObservableGauge("process_goroutines", metric.WithDescription("Number of goroutines"))
 	heapAlloc, _ := m.Int64ObservableGauge("process_heap_alloc_bytes", metric.WithDescription("Bytes of allocated heap objects"))

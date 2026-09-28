@@ -132,23 +132,13 @@ func contextFields(ctx context.Context) []zap.Field {
 	return []zap.Field{zap.String("trace_id", sc.TraceID().String()), zap.String("span_id", sc.SpanID().String())}
 }
 
-func (t *Telemetry) Log() Logger {
-	return zapLogger{l: t.Logger, ctx: t.baseCtx, onWrite: t.recordLogError}
-}
-func (t *Telemetry) LogContext(ctx context.Context) Logger {
-	if ctx == nil {
-		ctx = context.Background()
+func (t *Telemetry) Log(contexts ...context.Context) Logger {
+	ctx := t.baseCtx
+	if len(contexts) > 0 && contexts[0] != nil {
+		ctx = contexts[0]
 	}
 	return zapLogger{l: t.Logger, ctx: ctx, onWrite: t.recordLogError}
 }
-func (t *Telemetry) TraceLog(m string, a ...any) { t.Log().Trace(m, a...) }
-func (t *Telemetry) Critical(m string, a ...any) { t.Log().Critical(m, a...) }
-func (t *Telemetry) Fatal(m string, a ...any)    { t.Log().Fatal(m, a...) }
-func (t *Telemetry) Error(m string, a ...any)    { t.Log().Error(m, a...) }
-func (t *Telemetry) Warn(m string, a ...any)     { t.Log().Warn(m, a...) }
-func (t *Telemetry) Info(m string, a ...any)     { t.Log().Info(m, a...) }
-func (t *Telemetry) Debug(m string, a ...any)    { t.Log().Debug(m, a...) }
-
 func (t *Telemetry) logIn(ctx context.Context, level zapcore.Level, msg string, fields ...zap.Field) {
 	fields = append(contextFields(ctx), fields...)
 	t.Logger.Desugar().Check(level, msg).Write(fields...)
@@ -157,11 +147,11 @@ func (t *Telemetry) logIn(ctx context.Context, level zapcore.Level, msg string, 
 func (t *Telemetry) recordLogError(level zapcore.Level) {
 	t.logMu.Lock()
 	defer t.logMu.Unlock()
-	if t.Meter == nil {
+	if t.meter == nil {
 		return
 	}
 	if t.logErrors == nil {
-		t.logErrors, _ = t.Meter.Counter("log_errors_total")
+		t.logErrors, _ = t.meter.Counter("log_errors_total")
 	}
 	if t.logErrors != nil {
 		t.logErrors.Add(context.Background(), 1, metric.WithAttributes(attribute.String("level", levelName(level))))
