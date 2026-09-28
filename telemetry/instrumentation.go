@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.uber.org/zap"
 )
 
@@ -129,10 +130,12 @@ func (t *Telemetry) Live() http.Handler {
 	})
 }
 
-// Ready returns a readiness handler (self + OTLP collector + custom checks).
+// Ready returns a readiness handler for the application itself and custom checks.
+// Exporter availability is reported by Health and never removes the service
+// from rotation.
 func (t *Telemetry) Ready() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		checks, allPass := t.runChecks(r.Context())
+		checks, allPass := t.runChecks(r.Context(), false)
 		code := http.StatusOK
 		status := "ready"
 		if !allPass {
@@ -146,7 +149,7 @@ func (t *Telemetry) Ready() http.Handler {
 // Health returns a combined health handler.
 func (t *Telemetry) Health() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		checks, allPass := t.runChecks(r.Context())
+		checks, allPass := t.runChecks(r.Context(), true)
 		status := "ok"
 		code := http.StatusOK
 		if !allPass {
@@ -229,14 +232,14 @@ func (t *Telemetry) registerHealthMetrics() {
 
 // runChecks executa self + OTLP collector + health checks customizados registrados,
 // registrando também as métricas de health check (ver recordHealthCheck).
-func (t *Telemetry) runChecks(ctx context.Context) ([]CheckResult, bool) {
+func (t *Telemetry) runChecks(ctx context.Context, includeCollector bool) ([]CheckResult, bool) {
 	allPass := true
 	checks := make([]CheckResult, 0, 2+len(t.healthChecksSnapshot()))
 
 	selfStatus, _ := t.recordHealthCheck(ctx, "self", func(context.Context) error { return nil })
 	checks = append(checks, CheckResult{Name: "self", Status: selfStatus})
 
-	if t.otlpEndpoint != "" {
+	if includeCollector && t.otlpEndpoint != "" {
 		st, err := t.recordHealthCheck(ctx, "otlp-collector", func(c context.Context) error {
 			return checkOTLPReachable(c, t.otlpEndpoint)
 		})
@@ -259,7 +262,9 @@ func (t *Telemetry) runChecks(ctx context.Context) ([]CheckResult, bool) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		st, err := t.recordHealthCheck(ctx, name, snapshot[name])
+		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		st, err := t.recordHealthCheck(checkCtx, name, snapshot[name])
+		cancel()
 		cr := CheckResult{Name: name, Status: st}
 		if err != nil {
 			allPass = false
@@ -361,6 +366,9 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 	if tel.tp != nil {
 		opts = append(opts, otelhttp.WithTracerProvider(tel.tp))
 	}
+	// Custom http_* metrics are the library's canonical server metrics. Keep
+	// otelhttp tracing/propagation while disabling its duplicate meter output.
+	opts = append(opts, otelhttp.WithMeterProvider(noop.NewMeterProvider()))
 
 	// Instrumentações de request criados uma única vez.
 	reqCount, _ := tel.Meter.Counter("http_requests_total")

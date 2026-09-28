@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"go.uber.org/zap"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -52,10 +53,8 @@ func TestMustNew(t *testing.T) {
 	_ = tel.Close()
 }
 
-// TestNewLoadsDotEnv é o teste de regressão do bug crítico: o New() deve
-// chamar environments.LoadDotEnv() para carregar o .env do working dir antes
-// de ler as variáveis. Sem isso a lib rodava em modo no-op (nada exportado)
-// e "nada aparecia no Grafana".
+// NewWithContext keeps configuration explicit and does not implicitly load a
+// local .env file.
 func TestNewWithContextUsesExplicitOptions(t *testing.T) {
 	tel, err := NewWithContext(context.Background(), Options{
 		ServiceName:  "test-svc",
@@ -212,6 +211,53 @@ func TestWithSpanAndLog(t *testing.T) {
 	}
 	if !inner {
 		t.Fatal("fn não foi chamada")
+	}
+}
+
+func TestWithSpanContextPreservesParent(t *testing.T) {
+	tel := newTestTel(t)
+	parent := context.WithValue(context.Background(), struct{}{}, "parent")
+	if err := tel.WithSpanContext(parent, "context-op", func(ctx context.Context) error {
+		if got := ctx.Value(struct{}{}); got != "parent" {
+			t.Fatalf("parent context value = %v, want parent", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithSpanContext() erro: %v", err)
+	}
+}
+
+func TestSensitiveFieldsAreRedacted(t *testing.T) {
+	fields := redactFields([]zap.Field{zap.String("authorization", "Bearer secret"), zap.String("order_id", "123")})
+	if fields[0].String != "[REDACTED]" {
+		t.Fatalf("authorization was not redacted: %q", fields[0].String)
+	}
+	if fields[1].String != "123" {
+		t.Fatalf("non-sensitive field changed: %q", fields[1].String)
+	}
+}
+
+func TestReadyDoesNotDependOnCollector(t *testing.T) {
+	tel := newTestTel(t)
+	tel.otlpEndpoint = "127.0.0.1:1"
+	ready, allPass := tel.runChecks(context.Background(), false)
+	if !allPass {
+		t.Fatal("readiness should pass without checking the collector")
+	}
+	for _, check := range ready {
+		if check.Name == "otlp-collector" {
+			t.Fatal("readiness must not include the OTLP collector")
+		}
+	}
+	health, _ := tel.runChecks(context.Background(), true)
+	foundCollector := false
+	for _, check := range health {
+		if check.Name == "otlp-collector" {
+			foundCollector = true
+		}
+	}
+	if !foundCollector {
+		t.Fatal("health should include the OTLP collector")
 	}
 }
 

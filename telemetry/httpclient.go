@@ -5,6 +5,8 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -39,13 +41,10 @@ const (
 	// defaultHTTPMaxRetries: 2 retries ⇒ até 3 tentativas por chamada.
 	defaultHTTPMaxRetries = 2
 	// defaultHTTPRetryBackoff é o delay inicial entre tentativas (dobra a cada
-	// retry, com teto maxHTTPRetryBackoff e jitter ±retryJitterFraction).
+	// retry, com teto maxHTTPRetryBackoff e full jitter).
 	defaultHTTPRetryBackoff = 100 * time.Millisecond
 	// maxHTTPRetryBackoff é o teto do delay entre tentativas.
 	maxHTTPRetryBackoff = 5 * time.Second
-	// retryJitterFraction é a amplitude do jitter ±20% aplicado ao delay
-	// (evita sincronização de retries entre chamadas concorrentes).
-	retryJitterFraction = 0.20
 )
 
 // clientMetrics agrega as primitivas OTel emitidas POR TENTATIVA. Os nomes
@@ -82,14 +81,15 @@ type HTTPOption func(*httpClientConfig)
 // vinculado ao ctx da tentativa após RoundTrip retornar (streaming); ele é
 // invocado ao sobrepor a tentativa e em qualquer falha final.
 type attemptResult struct {
-	resp     *http.Response
-	err      error
-	status   int                // 0 quando err != nil
-	elapsed  time.Duration      // duração da passagem pelo transporte
-	ctx      context.Context    // ctx da tentativa (linhagem p/ métricas)
-	cancel   context.CancelFunc // cancel do deadline desta tentativa
-	attempts int                // nº total de tentativas executadas (preenchido no fim)
-	fatal    bool               // erro que NÃO pode ser retentado (ex.: falha ao reconstruir corpo)
+	resp       *http.Response
+	err        error
+	status     int                // 0 quando err != nil
+	elapsed    time.Duration      // duração da passagem pelo transporte
+	ctx        context.Context    // ctx da tentativa (linhagem p/ métricas)
+	cancel     context.CancelFunc // cancel do deadline desta tentativa
+	attempts   int                // nº total de tentativas executadas (preenchido no fim)
+	fatal      bool               // erro que NÃO pode ser retentado (ex.: falha ao reconstruir corpo)
+	retryAfter time.Duration      // atraso sugerido pelo servidor
 }
 
 // clientRetryTransport envelopa o transporte instrumentado (otelhttp) com
@@ -128,7 +128,7 @@ func WithMaxRetries(n int) HTTPOption {
 }
 
 // WithRetryBackoff define o delay inicial entre tentativas (default 100ms),
-// dobrando a cada retry até o teto de 5s, sempre com jitter ±20%.
+// dobrando a cada retry até o teto de 5s, com full jitter.
 func WithRetryBackoff(base time.Duration) HTTPOption {
 	return func(c *httpClientConfig) {
 		if base > 0 {
@@ -278,20 +278,36 @@ func outcomeLabel(willRetry bool, err error, statusCode int) string {
 	}
 }
 
-// retryDelay calcula o delay antes do próximo retry: base dobrada `attempt`
-// vezes com jitter ±retryJitterFraction, SEMPRE limitado ao teto
-// maxHTTPRetryBackoff (aplicado após o jitter).
+// retryDelay calcula o delay com exponential backoff e full jitter.
 func retryDelay(base time.Duration, attempt int) time.Duration {
 	d := base
 	for i := 0; i < attempt && d < maxHTTPRetryBackoff; i++ {
-		d *= 2
+		if d > maxHTTPRetryBackoff/2 {
+			d = maxHTTPRetryBackoff
+		} else {
+			d *= 2
+		}
 	}
-	// Jitter de suavização de carga — sem propósito criptográfico.
-	jittered := time.Duration(float64(d) * (1 - retryJitterFraction + rand.Float64()*2*retryJitterFraction)) // #nosec G404
-	if jittered > maxHTTPRetryBackoff || jittered <= 0 {
-		return maxHTTPRetryBackoff
+	if d <= 0 {
+		return 0
 	}
-	return jittered
+	return time.Duration(rand.Int64N(int64(d) + 1))
+}
+
+func retryAfterDelay(resp *http.Response) time.Duration {
+	if resp == nil {
+		return 0
+	}
+	value := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		if delay := time.Until(when); delay > 0 {
+			return delay
+		}
+	}
+	return 0
 }
 
 // RoundTrip executa a cadeia de tentativas (métodos idempotentes) ou uma
@@ -364,9 +380,23 @@ func (rt *clientRetryTransport) executeAttempts(req *http.Request) attemptResult
 		drainResponse(&res)
 		pendingCancel = res.cancel
 
+		delay := retryDelay(rt.cfg.retryBackoff, attempt)
+		if res.retryAfter > delay {
+			delay = res.retryAfter
+		}
+		if delay > maxHTTPRetryBackoff {
+			delay = maxHTTPRetryBackoff
+		}
+		timer := time.NewTimer(delay)
 		select {
-		case <-time.After(retryDelay(rt.cfg.retryBackoff, attempt)):
+		case <-timer.C:
 		case <-req.Context().Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			// Caller desistiu durante o backoff: encerra propagaando o motivo
 			// real — nunca resposta vazia com err=nil.
 			pendingCancel()
@@ -435,6 +465,7 @@ func (rt *clientRetryTransport) tryOnce(req *http.Request, reqAttrs []attribute.
 	}
 	if err == nil && resp != nil {
 		res.status = resp.StatusCode
+		res.retryAfter = retryAfterDelay(resp)
 	}
 	rt.decrementInflight(actx, reqAttrs)
 	return res

@@ -42,12 +42,12 @@ Telemetria é a **torre de controle** + um painelzinho de instrumentos na sua fr
 | **OTLP/collector** | A central que recebe os relatórios de todas as torres |
 | **middleware** | O porteiro que anota quem chegou antes de qualquer coisa acontecer |
 | **healthcheck** | A pergunta "tá tudo bem?", respondida por `/live`, `/ready` e `/health` |
-| **baseCtx** | O mapa-múndi da aplicação: raiz (`context.Background()`) mantida internamente pela lib; todos os relatórios herdam dele |
+| **context** | O vínculo da operação; APIs context-first preservam a linhagem distribuída |
 
 ### Primeiras linhas
 
 ```go
-tel, err := telemetry.New() // sem parâmetros: lê HELLNET_* e usa context.Background() como base
+	tel, err := telemetry.New() // sem parâmetros: lê HELLNET_* e OTEL_*
 defer func() { _ = tel.Close() }() // desliga na ordem certa, sem perder relatórios
 mux.Handle("/", telemetry.Middleware(tel, meuHandler)) // o porteiro anota cada request
 ```
@@ -68,8 +68,7 @@ import (
 )
 
 func main() {
-	// Sem parâmetros: a lib lê HELLNET_TELEMETRY_* / HELLNET_* do ambiente e
-	// usa context.Background() como contexto-base (baseCtx) internamente.
+	// Sem parâmetros: a lib lê HELLNET_TELEMETRY_* / HELLNET_* / OTEL_*.
 	tel, err := telemetry.New()
 	if err != nil {
 		panic(err)
@@ -89,16 +88,16 @@ func main() {
 
 ## Required environment variables
 
-A lib aceita o prefixo **`HELLNET_TELEMETRY_*`** (padrão hellnet) ou o antigo
-**`HELLNET_*`** (fallback de retrocompatibilidade). Ambos funcionam.
+A lib aceita **`HELLNET_TELEMETRY_*`**, o antigo **`HELLNET_*`** e os nomes
+padrão **`OTEL_*`**, nessa ordem de precedência.
 
 | Variable | Example | Description |
 |---|---|---|
-| `HELLNET_TELEMETRY_SERVICE` | `order-api` | Service identifier (required) |
-| `HELLNET_TELEMETRY_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (required). **A porta deve vir junto do endpoint** (ex.: `:4318` ou `:443`); não há variável de porta separada. Se a porta for omitida, é inferida do scheme (443 p/ https, 80 p/ http) |
+| `HELLNET_TELEMETRY_SERVICE` / `OTEL_SERVICE_NAME` | `order-api` | Service identifier (default `telemetry`) |
+| `HELLNET_TELEMETRY_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (optional) |
 | `HELLNET_TELEMETRY_ENVIRONMENT` | `Development` | Ambiente (**opcional**); usado como atributo de resource (`deployment.environment`) |
 
-> Apenas `SERVICE` e `ENDPOINT` são obrigatórios. A porta **não** é configurável via env separada — ela vive no `ENDPOINT`. Não há carregamento de arquivo `.env`.
+> O endpoint é opcional: vazio desliga a exportação OTLP, mantendo logs locais.
 
 > **Endpoint vazio**: se `HELLNET_TELEMETRY_ENDPOINT` (ou `HELLNET_ENDPOINT`) não
 > for definido, o export OTLP é desligado (logs ficam só em stdout; métricas e
@@ -110,24 +109,31 @@ A lib aceita o prefixo **`HELLNET_TELEMETRY_*`** (padrão hellnet) ou o antigo
 
 ### De ambiente (sem parâmetros)
 
-`New()` **não recebe parâmetros** — a lib lê as envs
-`HELLNET_TELEMETRY_*` / `HELLNET_*` e usa `context.Background()` como
-contexto-base (`baseCtx`):
+`New()` **não recebe parâmetros**. Ela lê as variáveis `HELLNET_*` legadas e
+as variáveis padrão do OpenTelemetry:
 
 ```go
-tel, _ := telemetry.New() // lê HELLNET_TELEMETRY_* / HELLNET_*
+tel, _ := telemetry.New()
 ```
 
-### Application context (baseCtx)
+Precedência: `HELLNET_TELEMETRY_*`, `HELLNET_*`, depois `OTEL_*`. Os headers
+OTLP podem ser informados em `OTEL_EXPORTER_OTLP_HEADERS` ou em
+`Options.OTLPHeaders` como `key=value,key2=value2`. Sampling usa
+`OTEL_TRACES_SAMPLER` (`always_on`, `always_off` ou `traceidratio`) e
+`OTEL_TRACES_SAMPLER_ARG`.
 
-A lib mantém um contexto-base (`baseCtx`) internamente, derivado de
-`context.Background()` na construção. Nenhum método da lib recebe ctx de app.
+### Application context
 
-Consequência de correlação: traces de aplicação formam **uma única linhagem**
-com raiz no `baseCtx` (`WithSpan`/`Worker` criam filhos sob ele; o ctx derivado
-é repassado ao callback para continuação por código otel-instrumentado).
-Traces request-scoped extraídos pelo **Middleware** permanecem independentes —
-origem são os requests inbound (comportamento server-side correto).
+Prefira APIs context-first para preservar a linhagem distribuída. As variantes
+sem contexto continuam disponíveis para jobs sem contexto de entrada:
+
+```go
+err := tel.WithSpanContext(ctx, "process-order", func(ctx context.Context) error {
+	return process(ctx, order)
+})
+tel.LogContext(ctx).Info("processing")
+err = tel.WorkerContext(ctx, "reconcile", run)
+```
 
 ### Sempre ligado
 
@@ -150,7 +156,7 @@ são exportadas exclusivamente via OTLP.
 | Endpoint | Handler | Purpose |
 |---|---|---|
 | `GET /live` | `tel.Live()` | Liveness probe — always 200 |
-| `GET /ready` | `tel.Ready()` | Readiness — self + OTLP collector TCP dial |
+| `GET /ready` | `tel.Ready()` | Readiness — self + custom application checks |
 | `GET /health` | `tel.Health()` | Aggregate — `ok`/`degraded` with all checks |
 
 ```go
@@ -166,15 +172,16 @@ mux.Handle("GET /health", tel.Health())
   "status": "ready",
   "checks": [
     {"name": "self", "status": "pass"},
-    {"name": "otlp-collector", "status": "pass"}
+    {"name": "postgres", "status": "pass"}
   ]
 }
 ```
 
 ### Custom health checks
 
-Além de `self` e do collector OTLP, registre dependências (DB, redis,
-downstream). Qualquer falha marca o serviço `not ready` / `degraded`:
+Registre dependências (DB, redis, downstream). `/ready` verifica apenas `self`
+e os checks da aplicação; o collector OTLP é informativo em `/health` e não
+remove o serviço da rotação:
 
 ```go
 tel.HealthRegister("postgres", func(ctx context.Context) error {
@@ -191,10 +198,10 @@ Métricas produzidas: `healthcheck_status{check,status}`,
 
 > 🧒 **Entenda com 15 anos:** GPS etapa-por-etapa — dá pra ver por onde o pedido passou e onde demorou.
 
-Fluxo padrão (ctx-free — span derivado do contexto-base, repassado ao callback):
+Fluxo recomendado (context-first):
 
 ```go
-err := tel.WithSpan("process-order", func(ctx context.Context) error {
+err := tel.WithSpanContext(ctx, "process-order", func(ctx context.Context) error {
 	// ctx contém o span; código otel-instrumentado continua a linhagem
 	return process(ctx, order)
 })
@@ -321,21 +328,8 @@ Conjunto clássico (SDK observables):
 - CPU/geral: `process_cpu_usage_percent`, `process_cpu_usage_ratio`, `process_num_cpu`,
   `process_uptime_seconds`, `process_open_fds` *(Linux)*, `process_threads` *(Linux)*
 
-Conjunto detalhado de métricas de runtime:
-
-- Memória: `process_heap_live_bytes`, `process_heap_free_bytes`,
-  `process_gc_heap_goal_bytes`, `process_gc_heap_limit_bytes`,
-  `process_mem_heap_objects_bytes`, `process_mem_heap_stacks_bytes`,
-  `process_mem_metadata_mcache_free_bytes`, `process_mem_metadata_mcache_inuse_bytes`,
-  `process_mem_metadata_other_bytes`, `process_mem_os_stacks_bytes`,
-  `process_mem_other_bytes`, `process_mem_profiling_buckets_bytes`
-- Mutex: `process_mutex_wait_seconds_total`, `process_mutex_lock_seconds_total`
-- CPU por classe (segundos): `process_cpu_gc_seconds_total`,
-  `process_cpu_gc_mark_assist_seconds_total`, `process_cpu_gc_mark_dedicated_seconds_total`,
-  `process_cpu_gc_mark_idle_seconds_total`, `process_cpu_gc_sweep_assist_seconds_total`,
-  `process_cpu_gc_sweep_dedicated_seconds_total`, `process_cpu_gc_sweep_idle_seconds_total`,
-  `process_cpu_scavenge_seconds_total`, `process_cpu_total_seconds_total`,
-  `process_cpu_user_seconds_total`, `process_cpu_idle_seconds_total`
+O conjunto acima é a única fonte customizada de métricas de runtime da lib;
+ela não registra uma segunda instrumentação `runtime/metrics` em paralelo.
 
 > ⚠️ `process_cpu_usage_percent`, `process_cpu_usage_ratio`, `process_open_fds` e
 > `process_threads` dependem de `/proc` e **só são emitidos em Linux**. Em macOS
@@ -430,16 +424,12 @@ tel.LogContext(ctx).Error("request failed", "error", err)
 {"time":"2026-01-15T10:30:00.123Z","level":"INFO","msg":"order created","order_id":"123","customer_id":"456","amount":99.9}
 ```
 
-### Redação de logs (PII)
+### Segurança
 
-Mascara valores de atributos sensíveis (`password`, `token`, `secret`,
-`authorization`, `api_key`, ...) no stdout **e** no sink OTLP:
-
-```go
-opts.RedactSensitive = true
-// ou chaves customizadas:
-opts.RedactKeys = []string{"session_id"}
-```
+Não registre tokens, senhas ou PII nos argumentos de log. `/metrics` e
+`/debug/pprof` não são criados automaticamente por esta biblioteca; monte
+qualquer endpoint administrativo em listener protegido e separado da porta
+pública da aplicação.
 
 ---
 
@@ -667,7 +657,7 @@ O profiling usa somente push para Pyroscope:
 
 | Sintoma | Causa provável | Solução |
 |---|---|---|
-| Nada aparece no Grafana, mas logs vão para stdout | **`.env` não carregado** → lib em modo no-op | O `New()` **deve** chamar `environments.LoadDotEnv()`. Confirme no startup: `telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio` |
+| Nada aparece no Grafana, mas logs vão para stdout | Endpoint OTLP vazio ou incorreto | Defina `HELLNET_TELEMETRY_ENDPOINT`/`OTEL_EXPORTER_OTLP_ENDPOINT` e valide `/v1/traces`, `/v1/metrics` e `/v1/logs`; a lib não carrega `.env` implicitamente |
 | `telemetry iniciado ... Alloy inacessível no startup` | Endpoint não responde (rede/VPN/port-forward) | Valide: `curl -v https://alloy.hellnet.com.br/v1/traces`; use port-forward ou HTTPRoute acessível |
 | Traces/Tempo OK, mas metrics não chegam ao collector | Endpoint OTLP ou pipeline de métricas incorreto | Valide o endpoint `/v1/metrics` e a configuração do collector |
 | Profiles não no Pyroscope | Endpoint derivado errado (Alloy com porta ≠ 9999) | Sete `HELLNET_TELEMETRY_PROFILE_ENDPOINT` |
@@ -679,20 +669,20 @@ O profiling usa somente push para Pyroscope:
 
 | Function | Description |
 |---|---|
-| `telemetry.New()` | Setup all-in-one (sem parâmetros): lê `HELLNET_*` e usa `context.Background()` como baseCtx |
+| `telemetry.New()` | Setup all-in-one (sem parâmetros): lê `HELLNET_*` e `OTEL_*` |
 | `telemetry.MustNew()` | Como `New`, mas entra em pânico em erro |
 | `telemetry.Middleware(tel, handler)` | HTTP tracing + request metrics + logging (request-scoped) |
 | `tel.Live()` / `tel.Ready()` / `tel.Health()` | Health probes (`http.Handler`) |
 | `tel.HealthRegister(name, fn)` | Custom health check — ctx **fornecido pela lib** |
-| `tel.WithSpan(name, fn)` | Span (raiz = baseCtx) + erro automático + `exceptions_total` em panic |
+| `tel.WithSpan(name, fn)` | Span de compatibilidade para jobs sem contexto + erro automático |
+| `tel.WithSpanContext(ctx, name, fn)` / `tel.Span(ctx, name, fn)` | Span filho do contexto recebido |
 | `tel.Trace().Start(ctx, name)` | Escape hatch avançado: span enraizado num ctx próprio |
 | `tel.Meter.Counter/Gauge/Histogram(name)` | Atalhos int64 de métrica |
 | `tel.Log().Trace/Debug/Info/Warn/Error/Fatal/Critical(...)` | Logging estruturado (stdout + OTLP) |
-| `tel.Worker(job, fn, extra...)` | Job/worker: span + `worker_*` metrics (ctx vem do baseCtx) |
+| `tel.Worker(job, fn, extra...)` | Job/worker de compatibilidade sem contexto |
 | `tel.HTTPClient(opts...)` | `*http.Client` outbound: trace W3C + retry/backoff + métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
 | `tel.Close()` | Flush OTLP |
-| `opts.RedactSensitive` / `opts.RedactKeys` | Mascara PII nos logs |
 
 ---
 
@@ -705,6 +695,12 @@ O profiling usa somente push para Pyroscope:
 | **Logs** | `go.uber.org/zap` + OTLP bridge | OTLP HTTP → Collector → Loki |
 
 Todos os sinais usam **OTLP HTTP**. gRPC não é suportado na configuração atual.
+
+## Releases
+
+As versões publicadas devem usar tags semver (`vMAJOR.MINOR.PATCH`). Mudanças
+de API incompatíveis exigem incremento de major; correções compatíveis usam
+minor ou patch conforme o impacto.
 
 Go 1.27+.
 

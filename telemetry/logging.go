@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -41,6 +42,37 @@ type zapLogger struct {
 	l       *zap.SugaredLogger
 	ctx     context.Context
 	onWrite func(zapcore.Level)
+}
+
+type redactingCore struct{ zapcore.Core }
+
+func (c redactingCore) With(fields []zap.Field) zapcore.Core {
+	return redactingCore{Core: c.Core.With(redactFields(fields))}
+}
+
+func (c redactingCore) Write(entry zapcore.Entry, fields []zap.Field) error {
+	return c.Core.Write(entry, redactFields(fields))
+}
+
+func redactFields(fields []zap.Field) []zap.Field {
+	redacted := make([]zap.Field, len(fields))
+	for i, field := range fields {
+		if isSensitiveKey(field.Key) {
+			redacted[i] = zap.String(field.Key, "[REDACTED]")
+		} else {
+			redacted[i] = field
+		}
+	}
+	return redacted
+}
+
+func isSensitiveKey(key string) bool {
+	switch strings.ToLower(strings.ReplaceAll(key, "-", "_")) {
+	case "password", "passwd", "token", "secret", "authorization", "api_key", "access_token", "refresh_token", "cookie", "set_cookie", "session_id":
+		return true
+	default:
+		return false
+	}
 }
 
 func (l zapLogger) log(level zapcore.Level, msg string, args ...any) {
@@ -244,7 +276,7 @@ func (t *Telemetry) buildLogger(o Options, res *sdkresource.Resource) error {
 		MessageKey: "msg", EncodeTime: zapcore.ISO8601TimeEncoder, EncodeLevel: encodeZapLevel,
 	}), zapcore.AddSync(os.Stdout), o.LogLevel)
 	otelCore := otelZapCore{logger: lp.Logger("zap"), level: o.LogLevel}
-	logger := zap.New(zapcore.NewTee(stdout, otelCore), zap.Hooks(func(entry zapcore.Entry) error {
+	logger := zap.New(zapcore.NewTee(redactingCore{Core: stdout}, redactingCore{Core: otelCore}), zap.Hooks(func(entry zapcore.Entry) error {
 		if entry.Level >= zap.ErrorLevel {
 			t.recordLogError(entry.Level)
 		}
@@ -257,7 +289,14 @@ func (t *Telemetry) buildLogger(o Options, res *sdkresource.Resource) error {
 func newLoggerProvider(opts Options, res *sdkresource.Resource) (*sdklog.LoggerProvider, error) {
 	logOpts := []sdklog.LoggerProviderOption{sdklog.WithResource(res)}
 	if opts.OTLPEndpoint != "" {
-		exporter, err := otlploghttp.New(context.Background(), otlploghttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/logs")), otlploghttp.WithTimeout(5*time.Second))
+		exporterOpts := []otlploghttp.Option{
+			otlploghttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/logs")),
+			otlploghttp.WithTimeout(5 * time.Second),
+		}
+		if len(opts.OTLPHeaders) > 0 {
+			exporterOpts = append(exporterOpts, otlploghttp.WithHeaders(opts.OTLPHeaders))
+		}
+		exporter, err := otlploghttp.New(context.Background(), exporterOpts...)
 		if err != nil {
 			return nil, err
 		}

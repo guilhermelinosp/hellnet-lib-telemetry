@@ -5,7 +5,7 @@
 //	tel, err := telemetry.New()
 //	defer tel.Close()
 //
-//	// Tracing (no ctx in the API — spans derive from the base context)
+//	// Tracing (context-first; WithSpan remains a compatibility helper)
 //	err := tel.WithSpan("operation", func(ctx context.Context) error {
 //		span := trace.SpanFromContext(ctx) // continues this span
 //		return doWork(ctx)
@@ -19,12 +19,9 @@
 //	// base-context trace lineage internally
 //	tel.Log().Info("processing", "id", orderID)
 //
-// Correlation consequence: application-level traces form a single lineage
-// rooted at the base context (WithSpan/Worker spawn children under it), and
-// nested WithSpan/Worker calls inside fn automatically become CHILDREN of the
-// active span. Request-scoped traces extracted by the HTTP Middleware remain
-// independent: they originate from inbound requests, which is correct
-// server-side behavior.
+// Context-first operations preserve the caller's distributed trace. The
+// context-free WithSpan/Worker helpers remain for background jobs with no
+// incoming context.
 package telemetry
 
 import (
@@ -32,6 +29,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,9 +56,6 @@ type Telemetry struct {
 
 	// baseCtx é o contexto-raiz da aplicação, informado UMA vez em New/MustNew.
 	baseCtx context.Context
-
-	spanMu    sync.Mutex
-	spanStack []*spanEntry
 
 	serviceName  string
 	otlpEndpoint string
@@ -94,6 +89,7 @@ type Options struct {
 	Environment              string
 	LogLevel                 zapcore.Level
 	ResourceAttrs            []attribute.KeyValue
+	OTLPHeaders              map[string]string
 	IncludeHealthCheckErrors bool
 }
 
@@ -114,6 +110,7 @@ type Client interface {
 	Metric() Meter
 	Close() error
 	WithSpan(name string, fn func(ctx context.Context) error) error
+	WithSpanContext(ctx context.Context, name string, fn func(ctx context.Context) error) error
 	Span(ctx context.Context, name string, fn func(ctx context.Context) error) error
 	Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
 	WorkerContext(ctx context.Context, job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
@@ -170,13 +167,34 @@ func otlpSignalURL(base, signalPath string) string {
 // HELLNET_TELEMETRY_ENDPOINT (ou HELLNET_ENDPOINT) definidos.
 func New() (*Telemetry, error) {
 	o := Options{
-		ServiceName:    envValue("HELLNET_TELEMETRY_SERVICE", "HELLNET_SERVICE", "telemetry"),
-		ServiceVersion: environments.GetString("HELLNET_TELEMETRY_SERVICE_VERSION"),
-		OTLPEndpoint:   envValue("HELLNET_TELEMETRY_ENDPOINT", "HELLNET_ENDPOINT", ""),
-		Environment:    envValue("HELLNET_TELEMETRY_ENVIRONMENT", "HELLNET_ENVIRONMENT", ""),
+		ServiceName:    envValueAny("telemetry", "HELLNET_TELEMETRY_SERVICE", "HELLNET_SERVICE", "OTEL_SERVICE_NAME"),
+		ServiceVersion: envValueAny(environments.GetString("HELLNET_TELEMETRY_SERVICE_VERSION"), "OTEL_SERVICE_VERSION"),
+		OTLPEndpoint:   envValueAny("", "HELLNET_TELEMETRY_ENDPOINT", "HELLNET_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT"),
+		Environment:    envValueAny("", "HELLNET_TELEMETRY_ENVIRONMENT", "HELLNET_ENVIRONMENT", "OTEL_DEPLOYMENT_ENVIRONMENT"),
+		OTLPHeaders:    parseOTLPHeaders(envValueAny("", "HELLNET_TELEMETRY_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS")),
 		LogLevel:       zapcore.InfoLevel,
 	}
 	return NewWithContext(context.Background(), o)
+}
+
+func parseOTLPHeaders(raw string) map[string]string {
+	result := make(map[string]string)
+	for _, pair := range strings.Split(raw, ",") {
+		key, value, ok := strings.Cut(pair, "=")
+		if ok && strings.TrimSpace(key) != "" {
+			result[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+	}
+	return result
+}
+
+func envValueAny(defaultValue string, keys ...string) string {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			return value
+		}
+	}
+	return defaultValue
 }
 
 func envValue(primary, fallback, defaultValue string) string {
@@ -335,7 +353,8 @@ func (t *Telemetry) Close() error {
 }
 
 // HealthRegister registra um health check customizado (ex.: DB, redis, downstream).
-// Executado em /ready e /health; falha marca o serviço como degraded.
+// Executado em /ready e /health; falha marca o serviço como degraded. O
+// collector OTLP é verificado apenas por /health e não bloqueia readiness.
 //
 // O parâmetro check MANTÉM o signature func(ctx context.Context) error, mas o
 // ctx é FORNECIDO PELA LIB na execução (derivado do request da chamada HTTP de

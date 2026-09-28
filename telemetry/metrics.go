@@ -233,9 +233,11 @@ func newMeterProvider(opts Options, res *sdkresource.Resource) (*sdkmetric.Meter
 
 	// Endpoint vazio → sem reader OTLP; métricas ficam apenas no SDK local.
 	if opts.OTLPEndpoint != "" {
-		exporter, err := otlpmetrichttp.New(
-			context.Background(), otlpmetrichttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/metrics")),
-		)
+		exporterOpts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/metrics"))}
+		if len(opts.OTLPHeaders) > 0 {
+			exporterOpts = append(exporterOpts, otlpmetrichttp.WithHeaders(opts.OTLPHeaders))
+		}
+		exporter, err := otlpmetrichttp.New(context.Background(), exporterOpts...)
 		if err != nil {
 			return nil, err
 		}

@@ -3,6 +3,9 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -16,24 +19,8 @@ import (
 )
 
 // Tracer abstrai a criação de spans (assinatura idêntica a trace.Tracer.Start).
-//
-// ESCAPE HATCH avançado: recebe ctx do CALLER explicitamente e não faz parte
-// do fluxo padrão de correlação (que é raiz(baseCtx) → filhos via
-// WithSpan/Worker). A superfície ctx-free é WithSpan/Worker apenas.
 type Tracer interface {
 	Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span)
-}
-
-// spanKey marca internamente ctxs carregando um span criado por ESTA lib
-// (runBaseSpan). Permite distinguir spans app-level (WithSpan/Worker) de spans
-// request-scoped extraídos pelo Middleware (estes NÃO carregam a chave), e é o
-// mecanismo pelo qual chamadas aninhadas enxergam o pai ativo.
-type spanKey struct{}
-
-// spanEntry guarda um spanCtx ativo na pilha de aninhamento da instância. É
-// ponteiro para permitir remoção por identidade sem comparar ctxs (==) diretamente.
-type spanEntry struct {
-	ctx context.Context
 }
 
 // buildTracer monta o TracerProvider e o propagador de contexto (sempre registrado globalmente).
@@ -53,84 +40,36 @@ func (t *Telemetry) buildTracer(o Options, res *sdkresource.Resource) error {
 // status. O ctx derivado (contendo o span) é repassado para fn, permitindo que
 // código otel-instrumentado mais a fundo continue a linhagem.
 //
-// Aninhamento automático: chamadas a WithSpan/Worker DENTRO de fn tornam-se
-// FILHAS do span ativo desta lib (a lib guarda internamente o spanCtx atual;
-// o pai preferido é esse ctx quando presente, caindo para o baseCtx na raiz).
-// Assim a linhagem aninha naturalmente: raiz(baseCtx) → outer → inner → …,
-// sem precisar repassar ctx pela API pública (que permanece ctx-free).
+// WithSpan é a API de compatibilidade para jobs sem contexto de entrada.
+// Para requests, consumers e jobs derivados de outra operação, use
+// WithSpanContext ou Span para preservar a linhagem distribuída.
 func (t *Telemetry) WithSpan(name string, fn func(ctx context.Context) error) error {
-	_, err := t.runBaseSpan(name, fn)
-	return err
+	return t.WithSpanContext(t.baseCtx, name, fn)
+}
+
+// WithSpanContext cria um span filho do contexto recebido. Esta é a API
+// context-first recomendada para instrumentar operações de aplicação.
+func (t *Telemetry) WithSpanContext(ctx context.Context, name string, fn func(ctx context.Context) error) error {
+	return t.Span(ctx, name, fn)
 }
 
 // Span starts a span from the caller context. It is the context-first API used
 // by fast-platform-modular services; WithSpan remains for legacy background
 // jobs that have no caller context.
 func (t *Telemetry) Span(ctx context.Context, name string, fn func(ctx context.Context) error) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	childCtx, span := t.Trace().Start(ctx, name)
-	defer span.End()
-	if err := fn(childCtx); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return err
-	}
-	return nil
+	_, err := t.runSpan(ctx, name, fn)
+	return err
 }
 
-// currentSpanParent devolve o pai do próximo span criado por runBaseSpan:
-// quando há um span desta lib ativo (topo da pilha de aninhamento), retorna-o
-// (o novo span nasce FILHO dele); caso contrário (ou se o span do topo não é
-// mais válido — ex.: tracing desligado), enraíza no contexto-base.
-func (t *Telemetry) currentSpanParent() context.Context {
-	t.spanMu.Lock()
-	defer t.spanMu.Unlock()
-	if n := len(t.spanStack); n > 0 {
-		if sc := trace.SpanContextFromContext(t.spanStack[n-1].ctx); sc.IsValid() {
-			return t.spanStack[n-1].ctx
-		}
-	}
-	return t.baseCtx
-}
-
-// pushSpanCtx empilha o spanCtx recém-criado (chamado em runBaseSpan).
-func (t *Telemetry) pushSpanCtx(e *spanEntry) {
-	t.spanMu.Lock()
-	defer t.spanMu.Unlock()
-	t.spanStack = append(t.spanStack, e)
-}
-
-// popSpanCtx remove a própria entrada da pilha de aninhamento (LIFO; o defer
-// garante a execução mesmo quando um panic é re-propagado).
-func (t *Telemetry) popSpanCtx(e *spanEntry) {
-	t.spanMu.Lock()
-	defer t.spanMu.Unlock()
-	for i := len(t.spanStack) - 1; i >= 0; i-- {
-		if t.spanStack[i] == e {
-			t.spanStack = append(t.spanStack[:i], t.spanStack[i+1:]...)
-			return
-		}
-	}
-}
-
-// runBaseSpan centraliza o ciclo de vida de um span de aplicação para
-// WithSpan/Worker: deriva o ctx do pai ativo (span aninhado desta lib quando
-// presente, senão o contexto-base raiz), repassa o ctx derivado para fn,
+// runSpan centraliza o ciclo de vida de um span de aplicação, repassa o ctx
+// derivado para fn,
 // recupera panics (incrementando exceptions_total, marcando o span como erro e
-// re-propagando o panic) e marca erro no span. Retorna o ctx contendo o span
-// (útil p/ correlação de métricas/log internos).
-func (t *Telemetry) runBaseSpan(name string, fn func(ctx context.Context) error) (context.Context, error) {
-	parent := t.currentSpanParent()
-	rawCtx, span := t.Trace().Start(parent, name)
-	// Marca o ctx como portador de span desta lib (spanKey): chamadas aninhadas
-	// de WithSpan/Worker reconhecem-no como pai automático.
-	entry := &spanEntry{}
-	entry.ctx = context.WithValue(rawCtx, spanKey{}, struct{}{})
-	ctx := entry.ctx
-	t.pushSpanCtx(entry)
-	defer t.popSpanCtx(entry)
+// re-propagando o panic) e marca erro no span.
+func (t *Telemetry) runSpan(parent context.Context, name string, fn func(ctx context.Context) error) (context.Context, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, span := t.Trace().Start(parent, name)
 	defer func() {
 		// Recupera panics automaticamente, contabilizando exceções
 		// (exceptions_total) e marcando o span como erro, preservando o
@@ -157,8 +96,7 @@ func (t *Telemetry) runBaseSpan(name string, fn func(ctx context.Context) error)
 
 // Trace retorna a abstração de traces. Nome evita colisão com o campo exportado Tracer.
 //
-// Uso interno da lib SEMPRE deriva do contexto-base (runBaseSpan); use apenas
-// como escape hatch avançado quando precisar enraizar spans num ctx próprio.
+// Use o contexto recebido pelo caller para preservar a linhagem distribuída.
 func (t *Telemetry) Trace() Tracer {
 	if t.Tracer == nil {
 		return otel.Tracer(t.serviceName)
@@ -169,10 +107,17 @@ func (t *Telemetry) Trace() Tracer {
 // newTracerProvider cria o TracerProvider SDK. Endpoint vazio → sem export OTLP.
 func newTracerProvider(opts Options, res *sdkresource.Resource) (*sdktrace.TracerProvider, error) {
 	tpOpts := []sdktrace.TracerProviderOption{sdktrace.WithResource(res)}
+	if sampler := configuredSampler(); sampler != nil {
+		tpOpts = append(tpOpts, sdktrace.WithSampler(sampler))
+	}
 
 	// Endpoint vazio → sem export OTLP (evita URL "https:" inválida no exporter).
 	if opts.OTLPEndpoint != "" {
-		exporter, err := otlptracehttp.New(context.Background(), otlptracehttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/traces")))
+		exporterOpts := []otlptracehttp.Option{otlptracehttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/traces"))}
+		if len(opts.OTLPHeaders) > 0 {
+			exporterOpts = append(exporterOpts, otlptracehttp.WithHeaders(opts.OTLPHeaders))
+		}
+		exporter, err := otlptracehttp.New(context.Background(), exporterOpts...)
 		if err != nil {
 			return nil, err
 		}
@@ -180,4 +125,21 @@ func newTracerProvider(opts Options, res *sdkresource.Resource) (*sdktrace.Trace
 	}
 
 	return sdktrace.NewTracerProvider(tpOpts...), nil
+}
+
+// configuredSampler honors the standard OTel sampler environment variables.
+// An invalid value returns nil so the SDK keeps its safe default.
+func configuredSampler() sdktrace.Sampler {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER"))) {
+	case "always_on":
+		return sdktrace.AlwaysSample()
+	case "always_off":
+		return sdktrace.NeverSample()
+	case "traceidratio":
+		ratio, err := strconv.ParseFloat(os.Getenv("OTEL_TRACES_SAMPLER_ARG"), 64)
+		if err == nil && ratio >= 0 && ratio <= 1 {
+			return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
+		}
+	}
+	return nil
 }
