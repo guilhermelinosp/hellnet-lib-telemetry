@@ -87,6 +87,7 @@ type Options struct {
 	ResourceAttrs []attribute.KeyValue
 }
 
+// Default returns the default telemetry options.
 func Default() Options {
 	return Options{LogLevel: slog.LevelInfo}
 }
