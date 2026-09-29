@@ -528,17 +528,18 @@ compor chamadas externas e jobs:
   por contexto;
 - `CircuitBreaker` — estados `closed`, `open` e `half-open`, com limiar de
   falhas e janela de recuperação;
-- `Bulkhead` — limite de concorrência com rejeição rápida quando cheio;
+- `Bulkhead` — limite de concorrência com rejeição rápida quando cheio; `BulkheadWait`
+  oferece espera limitada e respeita o cancelamento do contexto;
 - `Fallback` e `Timeout` — degradação explícita e limite do orçamento da chamada;
 - `Chain` e `Do[T]` — composição de políticas com resultado tipado.
 
 Exemplo:
 
 ```go
-breaker := &resilience.CircuitBreaker{
+breaker := resilience.NewCircuitBreaker(resilience.CircuitBreakerConfig{
     Threshold:   5,
     OpenTimeout: 30 * time.Second,
-}
+})
 policy := resilience.Chain(
     resilience.Fallback(func(ctx context.Context, err error) error {
         return serveFromCache(ctx, err)
@@ -560,9 +561,13 @@ order, err := resilience.Do(ctx, policy, func(ctx context.Context) (*Order, erro
 })
 ```
 
-A ordem recomendada é `bulkhead → circuit breaker → retry → timeout →
-operação`. A aplicação decide o fallback e a classificação de erros; a lib
-não repete automaticamente erros de negócio.
+`Chain` recebe as políticas da mais externa para a mais interna: a primeira
+política executa primeiro e envolve as seguintes. Neste exemplo, a ordem é
+`fallback → circuit breaker → retry → bulkhead → timeout → operação`.
+`Timeout` retorna `resilience.ErrTimeout` quando o prazo da tentativa expira;
+esse erro também satisfaz `errors.Is(err, context.DeadlineExceeded)`. A
+aplicação decide o fallback e a classificação de erros; a lib não repete
+automaticamente erros de negócio.
 
 ```go
 err := tel.WorkerContext(ctx, "process_order",

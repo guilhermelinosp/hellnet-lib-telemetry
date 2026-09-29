@@ -2,7 +2,6 @@ package resilience
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"time"
 )
@@ -19,7 +18,16 @@ const (
 	HalfOpen
 )
 
+// CircuitBreakerConfig configures a circuit breaker.
+type CircuitBreakerConfig struct {
+	Threshold     int
+	OpenTimeout   time.Duration
+	ShouldTrip    func(error) bool
+	OnStateChange func(from, to State)
+}
+
 // CircuitBreaker prevents repeated calls while a dependency is failing.
+// Public fields remain available for compatibility with struct literals.
 type CircuitBreaker struct {
 	Threshold     int
 	OpenTimeout   time.Duration
@@ -31,17 +39,50 @@ type CircuitBreaker struct {
 	failures int
 	openedAt time.Time
 	probing  bool
+	now      func() time.Time
+}
+
+// NewCircuitBreaker creates a breaker with resolved defaults.
+func NewCircuitBreaker(cfg CircuitBreakerConfig) *CircuitBreaker {
+	if cfg.Threshold <= 0 {
+		cfg.Threshold = 5
+	}
+	if cfg.OpenTimeout <= 0 {
+		cfg.OpenTimeout = 30 * time.Second
+	}
+	return &CircuitBreaker{Threshold: cfg.Threshold, OpenTimeout: cfg.OpenTimeout, ShouldTrip: cfg.ShouldTrip, OnStateChange: cfg.OnStateChange, now: time.Now}
+}
+
+func (cb *CircuitBreaker) clock() time.Time {
+	if cb.now != nil {
+		return cb.now()
+	}
+	return time.Now()
+}
+
+func (cb *CircuitBreaker) threshold() int {
+	if cb.Threshold > 0 {
+		return cb.Threshold
+	}
+	return 5
+}
+
+func (cb *CircuitBreaker) openTimeout() time.Duration {
+	if cb.OpenTimeout > 0 {
+		return cb.OpenTimeout
+	}
+	return 30 * time.Second
 }
 
 // Policy returns a policy backed by the circuit breaker.
 func (cb *CircuitBreaker) Policy() Policy {
 	return func(next Func) Func {
 		return func(ctx context.Context) error {
-			if err := cb.allow(time.Now()); err != nil {
+			if err := cb.allow(cb.clock()); err != nil {
 				return err
 			}
 			err := next(ctx)
-			cb.record(err)
+			cb.record(ctx, err)
 			return err
 		}
 	}
@@ -50,82 +91,80 @@ func (cb *CircuitBreaker) Policy() Policy {
 // State returns the current circuit breaker state.
 func (cb *CircuitBreaker) State() State {
 	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	cb.defaults()
-	cb.transitionIfReady(time.Now())
-	return cb.state
+	changed, from, to := cb.transitionIfReadyLocked(cb.clock())
+	state := cb.state
+	cb.mu.Unlock()
+	cb.notify(changed, from, to)
+	return state
 }
 
 func (cb *CircuitBreaker) allow(now time.Time) error {
 	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	cb.defaults()
-	cb.transitionIfReady(now)
+	changed, from, to := cb.transitionIfReadyLocked(now)
+	var err error
 	switch cb.state {
 	case Open:
-		return ErrCircuitOpen
+		err = ErrCircuitOpen
 	case HalfOpen:
 		if cb.probing {
-			return ErrCircuitOpen
+			err = ErrCircuitOpen
+		} else {
+			cb.probing = true
 		}
-		cb.probing = true
 	}
-	return nil
+	cb.mu.Unlock()
+	cb.notify(changed, from, to)
+	return err
 }
 
-func (cb *CircuitBreaker) record(err error) {
+func (cb *CircuitBreaker) record(ctx context.Context, err error) {
 	cb.mu.Lock()
-	defer cb.mu.Unlock()
-	cb.defaults()
-	if err == nil {
+	var changed bool
+	var from, to State
+	switch {
+	case err == nil:
 		cb.failures = 0
 		cb.probing = false
-		cb.setState(Closed)
-		return
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		changed, from, to = cb.setStateLocked(Closed)
+	case ctx != nil && ctx.Err() != nil:
 		if cb.state == HalfOpen {
 			cb.probing = false
 		}
-		return
-	}
-	if cb.ShouldTrip != nil && !cb.ShouldTrip(err) {
+	case cb.ShouldTrip != nil && !cb.ShouldTrip(err):
 		if cb.state == HalfOpen {
 			cb.probing = false
 		}
-		return
+	default:
+		cb.failures++
+		if cb.state == HalfOpen || cb.failures >= cb.threshold() {
+			cb.openedAt = cb.clock()
+			cb.probing = false
+			changed, from, to = cb.setStateLocked(Open)
+		}
 	}
-	cb.failures++
-	if cb.state == HalfOpen || cb.failures >= cb.Threshold {
-		cb.openedAt = time.Now()
+	cb.mu.Unlock()
+	cb.notify(changed, from, to)
+}
+
+func (cb *CircuitBreaker) transitionIfReadyLocked(now time.Time) (bool, State, State) {
+	if cb.state == Open && now.Sub(cb.openedAt) >= cb.openTimeout() {
 		cb.probing = false
-		cb.setState(Open)
+		return cb.setStateLocked(HalfOpen)
 	}
+	return false, cb.state, cb.state
 }
 
-func (cb *CircuitBreaker) defaults() {
-	if cb.Threshold <= 0 {
-		cb.Threshold = 5
-	}
-	if cb.OpenTimeout <= 0 {
-		cb.OpenTimeout = 30 * time.Second
-	}
-}
-
-func (cb *CircuitBreaker) transitionIfReady(now time.Time) {
-	if cb.state == Open && now.Sub(cb.openedAt) >= cb.OpenTimeout {
-		cb.probing = false
-		cb.setState(HalfOpen)
-	}
-}
-
-func (cb *CircuitBreaker) setState(next State) {
+func (cb *CircuitBreaker) setStateLocked(next State) (bool, State, State) {
 	if cb.state == next {
-		return
+		return false, cb.state, next
 	}
 	from := cb.state
 	cb.state = next
-	if cb.OnStateChange != nil {
-		cb.OnStateChange(from, next)
+	return true, from, next
+}
+
+func (cb *CircuitBreaker) notify(changed bool, from, to State) {
+	if changed && cb.OnStateChange != nil {
+		cb.OnStateChange(from, to)
 	}
 }

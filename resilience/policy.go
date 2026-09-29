@@ -47,9 +47,14 @@ func Timeout(duration time.Duration) Policy {
 			if duration <= 0 {
 				return next(ctx)
 			}
-			ctx, cancel := context.WithTimeout(ctx, duration)
+			parent := ctx
+			ctx, cancel := context.WithTimeout(parent, duration)
 			defer cancel()
-			return next(ctx)
+			err := next(ctx)
+			if err != nil && ctx.Err() == context.DeadlineExceeded && parent.Err() == nil {
+				return timeoutError{}
+			}
+			return err
 		}
 	}
 }
