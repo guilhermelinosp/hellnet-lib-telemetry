@@ -76,7 +76,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer tel.Close(ctx)
+	defer func() { _ = tel.Close(ctx) }()
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /live", tel.Live())
@@ -602,7 +602,10 @@ Métricas: `db_sql_*` (veja catálogo acima), particionadas por `db=name`.
 Sempre chame para flush dos buffers:
 
 ```go
-defer tel.Close(ctx) // timeout interno de 5s; força flush OTLP
+defer func() { _ = tel.Close(ctx) }() // usa contexto sem cancelamento; timeout padrão de 5s
+
+// Para exportar explicitamente antes do encerramento:
+_ = tel.ForceFlush(ctx)
 ```
 
 ---
@@ -651,7 +654,10 @@ trace.Span("operation", func(ctx context.Context) error {
 | `tel.WorkerContext(ctx, job, fn, extra...)` | Worker com contexto explícito |
 | `tel.HTTPClient(opts...)` | `*http.Client` outbound: trace W3C + retry/backoff + métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
-| `tel.Close(ctx)` | Flush OTLP |
+| `tel.ForceFlush(ctx)` | Exporta dados pendentes sem encerrar os providers |
+| `tel.Close(ctx)` | Force flush e encerra providers; usa `context.WithoutCancel(ctx)` e timeout de 5s |
+
+O timeout de encerramento pode ser ajustado com `HELLNET_TELEMETRY_SHUTDOWN_TIMEOUT` (por exemplo, `10s`).
 
 ---
 

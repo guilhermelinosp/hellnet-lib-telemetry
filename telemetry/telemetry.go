@@ -235,18 +235,28 @@ func (t *Telemetry) Close(ctx context.Context) error {
 		return errors.New("telemetry: close context is required")
 	}
 	t.shutdownOnce.Do(func() {
-		const shutdownTimeout = 5 * time.Second
+		shutdownTimeout := env.Duration("HELLNET_TELEMETRY_SHUTDOWN_TIMEOUT", 5*time.Second)
+		if shutdownTimeout <= 0 {
+			shutdownTimeout = 5 * time.Second
+		}
+		shutdownContext := context.WithoutCancel(ctx)
 
 		// shutters em ordem estável para a agregação de erros (logs → traces → metrics).
 		var shutters []func(context.Context) error
 		if t.lp != nil {
-			shutters = append(shutters, t.lp.Shutdown)
+			shutters = append(shutters, func(c context.Context) error {
+				return errors.Join(t.lp.ForceFlush(c), t.lp.Shutdown(c))
+			})
 		}
 		if t.tp != nil {
-			shutters = append(shutters, t.tp.Shutdown)
+			shutters = append(shutters, func(c context.Context) error {
+				return errors.Join(t.tp.ForceFlush(c), t.tp.Shutdown(c))
+			})
 		}
 		if t.mp != nil {
-			shutters = append(shutters, t.mp.Shutdown)
+			shutters = append(shutters, func(c context.Context) error {
+				return errors.Join(t.mp.ForceFlush(c), t.mp.Shutdown(c))
+			})
 		}
 		// Cada provider desliga em PARALELO com orçamento próprio de 5s; escreve
 		// no slot próprio e lê após Wait (happens-before via WaitGroup).
@@ -254,7 +264,7 @@ func (t *Telemetry) Close(ctx context.Context) error {
 		var wg sync.WaitGroup
 		for i := range shutters {
 			wg.Go(func() {
-				shutdownCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
+				shutdownCtx, cancel := context.WithTimeout(shutdownContext, shutdownTimeout)
 				defer cancel()
 				errs[i] = shutters[i](shutdownCtx)
 			})
@@ -272,6 +282,37 @@ func (t *Telemetry) Close(ctx context.Context) error {
 		}
 	})
 	return t.shutdownErr
+}
+
+// ForceFlush exports all telemetry currently buffered by the SDK providers.
+// The caller controls the deadline through ctx.
+func (t *Telemetry) ForceFlush(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("telemetry: flush context is required")
+	}
+	var flushers []func(context.Context) error
+	if t.lp != nil {
+		flushers = append(flushers, t.lp.ForceFlush)
+	}
+	if t.tp != nil {
+		flushers = append(flushers, t.tp.ForceFlush)
+	}
+	if t.mp != nil {
+		flushers = append(flushers, t.mp.ForceFlush)
+	}
+	errs := make([]error, len(flushers))
+	var wg sync.WaitGroup
+	for i := range flushers {
+		wg.Go(func() { errs[i] = flushers[i](ctx) })
+	}
+	wg.Wait()
+	var joined []error
+	for _, err := range errs {
+		if err != nil {
+			joined = append(joined, err)
+		}
+	}
+	return errors.Join(joined...)
 }
 
 // HealthRegister registra um health check customizado (ex.: DB, redis, downstream).
