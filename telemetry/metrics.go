@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -27,16 +28,16 @@ type ContextMeter struct {
 	ctx context.Context
 }
 
-func (m ContextMeter) Counter(name string, value int64) error {
-	return m.tel.Counter(m.ctx, name, value)
+func (m ContextMeter) Counter(name string, value int64, attrs ...attribute.KeyValue) error {
+	return m.tel.Counter(m.ctx, name, value, attrs...)
 }
 
-func (m ContextMeter) Gauge(name string, value int64) error {
-	return m.tel.Gauge(m.ctx, name, value)
+func (m ContextMeter) Gauge(name string, value int64, attrs ...attribute.KeyValue) error {
+	return m.tel.Gauge(m.ctx, name, value, attrs...)
 }
 
-func (m ContextMeter) Histogram(name string, value float64) error {
-	return m.tel.Duration(m.ctx, name, value)
+func (m ContextMeter) Histogram(name string, value float64, attrs ...attribute.KeyValue) error {
+	return m.tel.Duration(m.ctx, name, value, attrs...)
 }
 
 func (t *Telemetry) Metric(ctx context.Context) ContextMeter {

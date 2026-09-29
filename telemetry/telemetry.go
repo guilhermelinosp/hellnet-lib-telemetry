@@ -310,43 +310,43 @@ func (t *Telemetry) HealthRegister(name string, check func(ctx context.Context) 
 }
 
 // Counter incrementa um contador int64 (atalho: cria/obtém + Add em uma chamada).
-func (t *Telemetry) Counter(ctx context.Context, name string, value int64) error {
+func (t *Telemetry) Counter(ctx context.Context, name string, value int64, attrs ...attribute.KeyValue) error {
 	c, err := t.meter.Int64Counter(name)
 	if err != nil {
 		return err
 	}
-	c.Add(ctx, value)
+	c.Add(ctx, value, metric.WithAttributes(attrs...))
 	return nil
 }
 
 // Gauge grava um valor em um gauge int64 (atalho: cria/obtém + Record em uma chamada).
 // Nota: Int64Gauge do OTel é observável (callback), para set direto use Int64ObservableGauge via RegisterCallback.
 // Este atalho usa Record no Int64Gauge (compatível com OTel 1.27+).
-func (t *Telemetry) Gauge(ctx context.Context, name string, value int64) error {
+func (t *Telemetry) Gauge(ctx context.Context, name string, value int64, attrs ...attribute.KeyValue) error {
 	g, err := t.meter.Int64Gauge(name)
 	if err != nil {
 		return err
 	}
-	g.Record(ctx, value)
+	g.Record(ctx, value, metric.WithAttributes(attrs...))
 	return nil
 }
 
 // Histogram grava um valor em um histograma int64 (atalho: cria/obtém + Record em uma chamada).
-func (t *Telemetry) Histogram(ctx context.Context, name string, value int64) error {
+func (t *Telemetry) Histogram(ctx context.Context, name string, value int64, attrs ...attribute.KeyValue) error {
 	h, err := t.meter.Int64Histogram(name)
 	if err != nil {
 		return err
 	}
-	h.Record(ctx, value)
+	h.Record(ctx, value, metric.WithAttributes(attrs...))
 	return nil
 }
 
 // Duration grava uma duração em segundos em um histograma float64 (atalho: cria/obtém + Record em uma chamada).
-func (t *Telemetry) Duration(ctx context.Context, name string, value float64) error {
+func (t *Telemetry) Duration(ctx context.Context, name string, value float64, attrs ...attribute.KeyValue) error {
 	h, err := t.meter.Float64Histogram(name)
 	if err != nil {
 		return err
 	}
-	h.Record(ctx, value)
+	h.Record(ctx, value, metric.WithAttributes(attrs...))
 	return nil
 }
