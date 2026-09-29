@@ -1,12 +1,12 @@
 // Package telemetry provides opinionated OpenTelemetry observability for Go services.
 //
-// Usage (o contexto raiz é fornecido pelo chamador; a configuração vem do ambiente):
+// Usage (sem parâmetros — a lib lê tudo diretamente do ambiente):
 //
 //	ctx := context.Background()
 //	tel, err := telemetry.New(ctx)
 //	defer tel.Close(ctx)
 //
-//	// Tracing (context-first)
+//	// Tracing (context-first; WithSpan remains a compatibility helper)
 //	err := tel.Trace(ctx).Span("operation", func(ctx context.Context) error {
 //		span := trace.SpanFromContext(ctx) // continues this span
 //		return doWork(ctx)
@@ -19,7 +19,9 @@
 //	// base-context trace lineage internally
 //	tel.Log(ctx).Info("processing", "id", orderID)
 //
-// Context-first operations preserve the caller's distributed trace.
+// Context-first operations preserve the caller's distributed trace. The
+// context-free WithSpan/Worker helpers remain for background jobs with no
+// incoming context.
 package telemetry
 
 import (
@@ -31,6 +33,7 @@ import (
 	"time"
 
 	"github.com/guilhermelinosp/hellnet-lib-telemetry/internal/env"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -90,6 +93,12 @@ type Options struct {
 	IncludeHealthCheckErrors bool
 }
 
+// Telemetry is the single application facade for logs, metrics, traces and lifecycle.
+
+// Telemetry is the single application facade for logs, metrics, traces and
+// lifecycle. Context-aware methods are the public API; implementation details
+// remain private to this package.
+
 // otlpSignalURL retorna a URL completa de um sinal OTLP (traces/metrics/logs)
 // anexando o path do signal quando o ENDPOINT base não traz path. Versões
 // recentes do exporter OTel HTTP (v1.45+) NÃO anexam /v1/traces automaticamente
@@ -111,7 +120,7 @@ func otlpSignalURL(base, signalPath string) string {
 
 // New creates a fully initialized Telemetry instance.
 //
-// # Leitura de ambiente
+// # Sem parâmetros — leitura de ambiente
 //
 // A lib lê diretamente as envs HELLNET_TELEMETRY_*, HELLNET_* e OTEL_*, sem
 // carregar arquivos .env ou depender de uma biblioteca externa de ambiente.
@@ -193,7 +202,7 @@ func NewWithOptions(ctx context.Context, o Options) (*Telemetry, error) {
 		return nil, err
 	}
 
-	// Meter nunca fica nil, mesmo quando metrics está desligado.
+	// Meter nunca fica nil (noop se metrics desligado).
 	if tel.meter == nil {
 		tel.meter = otel.GetMeterProvider().Meter("noop")
 	}
