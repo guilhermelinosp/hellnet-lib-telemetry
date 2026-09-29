@@ -49,7 +49,7 @@ Telemetria é a **torre de controle** + um painelzinho de instrumentos na sua fr
 ```go
 ctx := context.Background()
 tel, err := telemetry.New(ctx) // lê HELLNET_* e OTEL_*
-defer func() { _ = tel.Close() }() // desliga na ordem certa, sem perder relatórios
+defer func() { _ = tel.Close(ctx) }() // desliga na ordem certa, sem perder relatórios
 mux.Handle("/", telemetry.Middleware(tel, meuHandler)) // o porteiro anota cada request
 ```
 
@@ -76,7 +76,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer tel.Close()
+	defer tel.Close(ctx)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /live", tel.Live())
@@ -599,7 +599,7 @@ Métricas: `db_sql_*` (veja catálogo acima), particionadas por `db=name`.
 Sempre chame para flush dos buffers:
 
 ```go
-defer tel.Close() // timeout interno de 5s; força flush OTLP
+defer tel.Close(ctx) // timeout interno de 5s; força flush OTLP
 ```
 
 ---
@@ -663,7 +663,7 @@ O profiling usa somente push para Pyroscope:
 | `tel.WorkerContext(ctx, job, fn, extra...)` | Worker com contexto explícito |
 | `tel.HTTPClient(opts...)` | `*http.Client` outbound: trace W3C + retry/backoff + métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
-| `tel.Close()` | Flush OTLP |
+| `tel.Close(ctx)` | Flush OTLP |
 
 ---
 

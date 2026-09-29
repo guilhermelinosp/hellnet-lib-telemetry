@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -86,12 +87,15 @@ func defaultProfileConfig() profileConfig {
 //
 // Exemplo (Alloy in-cluster, ENDPOINT=http://alloy:4318):
 //
-//	tel.ProfilesStart() // deriva http://alloy:9999
+//	tel.ProfilesStart(ctx) // deriva http://alloy:9999
 //
 // Exemplo (via gateway, ENDPOINT=https://alloy.hellnet.com.br):
 //
-//	tel.ProfilesStart() // deriva https://alloy.hellnet.com.br/ingest
-func (t *Telemetry) ProfilesStart(opts ...ProfileOption) (*pyroscope.Profiler, error) {
+//	tel.ProfilesStart(ctx) // deriva https://alloy.hellnet.com.br/ingest
+func (t *Telemetry) ProfilesStart(ctx context.Context, opts ...ProfileOption) (*pyroscope.Profiler, error) {
+	if ctx == nil {
+		return nil, errors.New("telemetry: profiling context is required")
+	}
 	if p, ok := t.profiler.(*pyroscope.Profiler); ok {
 		return p, nil // já iniciado (idempotente)
 	}

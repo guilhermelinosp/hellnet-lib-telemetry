@@ -49,8 +49,8 @@ func (t *Telemetry) Metric(contexts ...context.Context) ContextMeter {
 
 // buildMeter monta o MeterProvider OTLP, as runtime metrics e as métricas de
 // health check. Não há endpoint local de exposição de métricas.
-func (t *Telemetry) buildMeter(o Options, res *sdkresource.Resource) error {
-	mp, err := newMeterProvider(o, res)
+func (t *Telemetry) buildMeter(ctx context.Context, o Options, res *sdkresource.Resource) error {
+	mp, err := newMeterProvider(ctx, o, res)
 	if err != nil {
 		return err
 	}
@@ -224,7 +224,7 @@ func readProcessCPUNs() (int64, error) {
 }
 
 // newMeterProvider cria o MeterProvider SDK com exportação exclusivamente OTLP.
-func newMeterProvider(opts Options, res *sdkresource.Resource) (*sdkmetric.MeterProvider, error) {
+func newMeterProvider(ctx context.Context, opts Options, res *sdkresource.Resource) (*sdkmetric.MeterProvider, error) {
 	readerOpts := []sdkmetric.Option{sdkmetric.WithResource(res)}
 
 	// Endpoint vazio → sem reader OTLP; métricas ficam apenas no SDK local.
@@ -233,7 +233,7 @@ func newMeterProvider(opts Options, res *sdkresource.Resource) (*sdkmetric.Meter
 		if len(opts.OTLPHeaders) > 0 {
 			exporterOpts = append(exporterOpts, otlpmetrichttp.WithHeaders(opts.OTLPHeaders))
 		}
-		exporter, err := otlpmetrichttp.New(context.Background(), exporterOpts...)
+		exporter, err := otlpmetrichttp.New(ctx, exporterOpts...)
 		if err != nil {
 			return nil, err
 		}

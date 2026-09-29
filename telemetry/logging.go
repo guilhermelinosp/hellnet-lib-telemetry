@@ -41,7 +41,7 @@ type Logger interface {
 type zapLogger struct {
 	l       *zap.SugaredLogger
 	ctx     context.Context
-	onWrite func(zapcore.Level)
+	onWrite func(context.Context, zapcore.Level)
 }
 
 type redactingCore struct{ zapcore.Core }
@@ -90,7 +90,7 @@ func (l zapLogger) logNamed(label, msg string, args ...any) {
 	if core.Enabled(level) {
 		_ = core.Write(zapcore.Entry{Level: level, Time: time.Now(), Message: msg}, fields)
 		if l.onWrite != nil {
-			l.onWrite(level)
+			l.onWrite(l.ctx, level)
 		}
 	}
 }
@@ -144,7 +144,7 @@ func (t *Telemetry) logIn(ctx context.Context, level zapcore.Level, msg string, 
 	t.Logger.Desugar().Check(level, msg).Write(fields...)
 }
 
-func (t *Telemetry) recordLogError(level zapcore.Level) {
+func (t *Telemetry) recordLogError(ctx context.Context, level zapcore.Level) {
 	t.logMu.Lock()
 	defer t.logMu.Unlock()
 	if t.meter == nil {
@@ -154,7 +154,7 @@ func (t *Telemetry) recordLogError(level zapcore.Level) {
 		t.logErrors, _ = t.meter.Int64Counter("log_errors_total")
 	}
 	if t.logErrors != nil {
-		t.logErrors.Add(context.Background(), 1, metric.WithAttributes(attribute.String("level", levelName(level))))
+		t.logErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("level", levelName(level))))
 	}
 }
 
@@ -183,11 +183,12 @@ type otelZapCore struct {
 	logger otelLog.Logger
 	level  zapcore.LevelEnabler
 	fields []zap.Field
+	ctx    context.Context
 }
 
 func (c otelZapCore) Enabled(level zapcore.Level) bool { return c.level.Enabled(level) }
 func (c otelZapCore) With(fields []zap.Field) zapcore.Core {
-	return otelZapCore{logger: c.logger, level: c.level, fields: append(append([]zap.Field{}, c.fields...), fields...)}
+	return otelZapCore{logger: c.logger, level: c.level, fields: append(append([]zap.Field{}, c.fields...), fields...), ctx: c.ctx}
 }
 func (c otelZapCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
 	if c.Enabled(e.Level) {
@@ -210,7 +211,7 @@ func (c otelZapCore) Write(e zapcore.Entry, fields []zap.Field) error {
 		attrs = append(attrs, zapAttribute(key, value))
 	}
 	record.AddAttributes(attrs...)
-	c.logger.Emit(context.Background(), record)
+	c.logger.Emit(c.ctx, record)
 	return nil
 }
 
@@ -255,8 +256,8 @@ func encodeZapLevel(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	enc.AppendString(levelName(level))
 }
 
-func (t *Telemetry) buildLogger(o Options, res *sdkresource.Resource) error {
-	lp, err := newLoggerProvider(o, res)
+func (t *Telemetry) buildLogger(ctx context.Context, o Options, res *sdkresource.Resource) error {
+	lp, err := newLoggerProvider(ctx, o, res)
 	if err != nil {
 		return err
 	}
@@ -265,10 +266,10 @@ func (t *Telemetry) buildLogger(o Options, res *sdkresource.Resource) error {
 		TimeKey: "time", LevelKey: "level", NameKey: "logger", CallerKey: "caller",
 		MessageKey: "msg", EncodeTime: zapcore.ISO8601TimeEncoder, EncodeLevel: encodeZapLevel,
 	}), zapcore.AddSync(os.Stdout), o.LogLevel)
-	otelCore := otelZapCore{logger: lp.Logger("zap"), level: o.LogLevel}
+	otelCore := otelZapCore{logger: lp.Logger("zap"), level: o.LogLevel, ctx: ctx}
 	logger := zap.New(zapcore.NewTee(redactingCore{Core: stdout}, redactingCore{Core: otelCore}), zap.Hooks(func(entry zapcore.Entry) error {
 		if entry.Level >= zap.ErrorLevel {
-			t.recordLogError(entry.Level)
+			t.recordLogError(t.baseCtx, entry.Level)
 		}
 		return nil
 	}))
@@ -276,7 +277,7 @@ func (t *Telemetry) buildLogger(o Options, res *sdkresource.Resource) error {
 	return nil
 }
 
-func newLoggerProvider(opts Options, res *sdkresource.Resource) (*sdklog.LoggerProvider, error) {
+func newLoggerProvider(ctx context.Context, opts Options, res *sdkresource.Resource) (*sdklog.LoggerProvider, error) {
 	logOpts := []sdklog.LoggerProviderOption{sdklog.WithResource(res)}
 	if opts.OTLPEndpoint != "" {
 		exporterOpts := []otlploghttp.Option{
@@ -286,7 +287,7 @@ func newLoggerProvider(opts Options, res *sdkresource.Resource) (*sdklog.LoggerP
 		if len(opts.OTLPHeaders) > 0 {
 			exporterOpts = append(exporterOpts, otlploghttp.WithHeaders(opts.OTLPHeaders))
 		}
-		exporter, err := otlploghttp.New(context.Background(), exporterOpts...)
+		exporter, err := otlploghttp.New(ctx, exporterOpts...)
 		if err != nil {
 			return nil, err
 		}

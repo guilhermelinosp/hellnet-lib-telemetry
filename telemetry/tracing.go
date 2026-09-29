@@ -29,8 +29,8 @@ func (t ContextTracer) Span(name string, fn func(ctx context.Context) error) err
 }
 
 // buildTracer monta o TracerProvider e o propagador de contexto (sempre registrado globalmente).
-func (t *Telemetry) buildTracer(o Options, res *sdkresource.Resource) error {
-	tp, err := newTracerProvider(o, res)
+func (t *Telemetry) buildTracer(ctx context.Context, o Options, res *sdkresource.Resource) error {
+	tp, err := newTracerProvider(ctx, o, res)
 	if err != nil {
 		return err
 	}
@@ -47,7 +47,7 @@ func (t *Telemetry) buildTracer(o Options, res *sdkresource.Resource) error {
 // re-propagando o panic) e marca erro no span.
 func (t *Telemetry) runSpan(parent context.Context, name string, fn func(ctx context.Context) error) (context.Context, error) {
 	if parent == nil {
-		parent = context.Background()
+		parent = t.baseCtx
 	}
 	ctx, span := t.rawTrace().Start(parent, name)
 	defer func() {
@@ -93,7 +93,7 @@ func (t *Telemetry) rawTrace() trace.Tracer {
 }
 
 // newTracerProvider cria o TracerProvider SDK. Endpoint vazio → sem export OTLP.
-func newTracerProvider(opts Options, res *sdkresource.Resource) (*sdktrace.TracerProvider, error) {
+func newTracerProvider(ctx context.Context, opts Options, res *sdkresource.Resource) (*sdktrace.TracerProvider, error) {
 	tpOpts := []sdktrace.TracerProviderOption{sdktrace.WithResource(res)}
 	if sampler := configuredSampler(); sampler != nil {
 		tpOpts = append(tpOpts, sdktrace.WithSampler(sampler))
@@ -105,7 +105,7 @@ func newTracerProvider(opts Options, res *sdkresource.Resource) (*sdktrace.Trace
 		if len(opts.OTLPHeaders) > 0 {
 			exporterOpts = append(exporterOpts, otlptracehttp.WithHeaders(opts.OTLPHeaders))
 		}
-		exporter, err := otlptracehttp.New(context.Background(), exporterOpts...)
+		exporter, err := otlptracehttp.New(ctx, exporterOpts...)
 		if err != nil {
 			return nil, err
 		}

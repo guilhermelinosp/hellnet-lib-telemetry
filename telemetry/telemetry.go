@@ -4,20 +4,20 @@
 //
 //	ctx := context.Background()
 //	tel, err := telemetry.New(ctx)
-//	defer tel.Close()
+//	defer tel.Close(ctx)
 //
 //	// Tracing (context-first)
-//	err := tel.Trace(context.Background()).Span("operation", func(ctx context.Context) error {
+//	err := tel.Trace(ctx).Span("operation", func(ctx context.Context) error {
 //		span := trace.SpanFromContext(ctx) // continues this span
 //		return doWork(ctx)
 //	})
 //
 //	// Metrics
-//	_ = tel.Metric(context.Background()).Counter("requests.total", 1)
+//	_ = tel.Metric(ctx).Counter("requests.total", 1)
 //
 //	// Logging (via Zap → stdout + OTLP → Loki), correlated with the
 //	// base-context trace lineage internally
-//	tel.Log().Info("processing", "id", orderID)
+//	tel.Log(ctx).Info("processing", "id", orderID)
 //
 // Context-first operations preserve the caller's distributed trace.
 package telemetry
@@ -183,13 +183,13 @@ func NewWithOptions(ctx context.Context, o Options) (*Telemetry, error) {
 	}
 
 	// ── Logging / Tracing / Metrics ───────────────────────────────────
-	if err := tel.buildLogger(o, res); err != nil {
+	if err := tel.buildLogger(ctx, o, res); err != nil {
 		return nil, err
 	}
-	if err := tel.buildTracer(o, res); err != nil {
+	if err := tel.buildTracer(ctx, o, res); err != nil {
 		return nil, err
 	}
-	if err := tel.buildMeter(o, res); err != nil {
+	if err := tel.buildMeter(ctx, o, res); err != nil {
 		return nil, err
 	}
 
@@ -217,7 +217,7 @@ func NewWithOptions(ctx context.Context, o Options) (*Telemetry, error) {
 	// OTLP configurado. Se não houver endpoint, fica desligado silenciosamente
 	// (não falha o New — profiling é best-effort).
 	if o.OTLPEndpoint != "" {
-		if _, err := tel.ProfilesStart(); err != nil {
+		if _, err := tel.ProfilesStart(ctx); err != nil {
 			tel.Log(ctx).Warn("telemetry: profiling não iniciado", "error", err)
 		}
 	}
@@ -239,7 +239,10 @@ func MustNew(ctx context.Context) *Telemetry {
 // shut down IN PARALLEL — one slow/timing-out provider no longer consumes the
 // budget of the others. Errors are aggregated in stable order
 // (logs → traces → metrics). Call with defer when the service terminates.
-func (t *Telemetry) Close() error {
+func (t *Telemetry) Close(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("telemetry: close context is required")
+	}
 	t.shutdownOnce.Do(func() {
 		const shutdownTimeout = 5 * time.Second
 
@@ -266,9 +269,9 @@ func (t *Telemetry) Close() error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+				shutdownCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
 				defer cancel()
-				errs[i] = shutters[i](ctx)
+				errs[i] = shutters[i](shutdownCtx)
 			}()
 		}
 		wg.Wait()

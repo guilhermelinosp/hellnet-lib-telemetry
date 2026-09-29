@@ -497,7 +497,7 @@ var latencyBucketBoundaries = []float64{
 // job agendado (cron) ou task em background ganha observabilidade sem escrever
 // boilerplate.
 //
-// A lib mantém um contexto-base (baseCtx, derivado de context.Background()):
+// A lib mantém o contexto-base recebido pelo construtor para operações internas:
 // o span do job deriva dele (raiz(baseCtx) → filhos) e o ctx derivado é
 // repassado a fn para continuação da linhagem por código otel-instrumentado
 // mais a fundo.

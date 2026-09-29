@@ -22,7 +22,7 @@ func newTestTel(t *testing.T) *Telemetry {
 	if err != nil {
 		t.Fatalf("New() retornou erro: %v", err)
 	}
-	t.Cleanup(func() { _ = tel.Close() })
+	t.Cleanup(func() { _ = tel.Close(context.Background()) })
 	return tel
 }
 
@@ -37,7 +37,7 @@ func TestNewAndClose(t *testing.T) {
 	if tel.Logger == nil {
 		t.Fatal("Logger não deve ser nil")
 	}
-	if err := tel.Close(); err != nil {
+	if err := tel.Close(context.Background()); err != nil {
 		t.Fatalf("Close() erro: %v", err)
 	}
 }
@@ -50,7 +50,7 @@ func TestMustNew(t *testing.T) {
 	if tel == nil {
 		t.Fatal("MustNew() retornou nil")
 	}
-	_ = tel.Close()
+	_ = tel.Close(context.Background())
 }
 
 // NewWithOptions keeps configuration explicit and does not implicitly load a
@@ -63,7 +63,7 @@ func TestNewWithOptionsUsesExplicitOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWithOptions() erro: %v", err)
 	}
-	defer tel.Close()
+	defer tel.Close(context.Background())
 	if tel.otlpEndpoint != "http://test-collector:4318" {
 		t.Fatalf("endpoint = %q, want http://test-collector:4318", tel.otlpEndpoint)
 	}
@@ -333,7 +333,7 @@ func TestProfilesStartNoEndpoint(t *testing.T) {
 	tel := newTestTel(t)
 	// Sem endpoint configurado (newTestTel zera HELLNET_TELEMETRY_ENDPOINT),
 	// ProfilesStart deve retornar erro (não conecta).
-	prof, err := tel.ProfilesStart()
+	prof, err := tel.ProfilesStart(context.Background())
 	if err == nil {
 		t.Fatal("esperado erro com HELLNET_TELEMETRY_ENDPOINT vazio")
 	}
@@ -379,7 +379,7 @@ func TestProfilesStartIntegration(t *testing.T) {
 	}
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
 	tel := MustNew(context.Background()) // auto-inicia ProfilesStart() internamente
-	defer tel.Close()
+	defer tel.Close(context.Background())
 	if tel.profiler == nil {
 		t.Fatal("profiler não iniciou automaticamente no New()")
 	}
@@ -398,7 +398,7 @@ func TestAlloyIntegration(t *testing.T) {
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
 	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
 	tel := MustNew(context.Background())
-	defer tel.Close()
+	defer tel.Close(context.Background())
 
 	tel.Log().Info("integration test log", "ok", true)
 	if err := tel.Trace(context.Background()).Span("integration-span", func(ctx context.Context) error {
