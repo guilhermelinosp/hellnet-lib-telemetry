@@ -1,8 +1,9 @@
 // Package telemetry provides opinionated OpenTelemetry observability for Go services.
 //
-// Usage (sem parâmetros — a lib lê tudo diretamente do ambiente):
+// Usage (o contexto raiz é fornecido pelo chamador; a configuração vem do ambiente):
 //
-//	tel, err := telemetry.New()
+//	ctx := context.Background()
+//	tel, err := telemetry.New(ctx)
 //	defer tel.Close()
 //
 //	// Tracing (context-first)
@@ -110,14 +111,14 @@ func otlpSignalURL(base, signalPath string) string {
 
 // New creates a fully initialized Telemetry instance.
 //
-// # Sem parâmetros — leitura de ambiente
+// # Leitura de ambiente
 //
 // A lib lê diretamente as envs HELLNET_TELEMETRY_*, HELLNET_* e OTEL_*, sem
 // carregar arquivos .env ou depender de uma biblioteca externa de ambiente.
 //
 // Requer HELLNET_TELEMETRY_SERVICE (ou HELLNET_SERVICE) e
 // HELLNET_TELEMETRY_ENDPOINT (ou HELLNET_ENDPOINT) definidos.
-func New() (*Telemetry, error) {
+func New(ctx context.Context) (*Telemetry, error) {
 	prefixes := []string{"HELLNET_TELEMETRY_", "HELLNET_"}
 	o := Options{
 		ServiceName:    env.Prefixed(prefixes, "SERVICE", env.String("OTEL_SERVICE_NAME", "telemetry")),
@@ -127,7 +128,7 @@ func New() (*Telemetry, error) {
 		OTLPHeaders:    parseOTLPHeaders(env.Prefixed(prefixes, "HEADERS", env.String("OTEL_EXPORTER_OTLP_HEADERS", ""))),
 		LogLevel:       zapcore.InfoLevel,
 	}
-	return NewWithContext(context.Background(), o)
+	return NewWithOptions(ctx, o)
 }
 
 func parseOTLPHeaders(raw string) map[string]string {
@@ -141,11 +142,10 @@ func parseOTLPHeaders(raw string) map[string]string {
 	return result
 }
 
-// NewWithContext creates telemetry with explicit application context and options.
-// New remains the environment-based compatibility entry point.
-func NewWithContext(ctx context.Context, o Options) (*Telemetry, error) {
+// NewWithOptions creates telemetry with an explicit context and options.
+func NewWithOptions(ctx context.Context, o Options) (*Telemetry, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, errors.New("telemetry: context is required")
 	}
 	if o.LogLevel == 0 {
 		o.LogLevel = zapcore.InfoLevel
@@ -226,8 +226,8 @@ func NewWithContext(ctx context.Context, o Options) (*Telemetry, error) {
 }
 
 // MustNew is like New but panics on error. Use at startup.
-func MustNew() *Telemetry {
-	t, err := New()
+func MustNew(ctx context.Context) *Telemetry {
+	t, err := New(ctx)
 	if err != nil {
 		panic(err)
 	}

@@ -18,7 +18,7 @@ func newTestTel(t *testing.T) *Telemetry {
 	t.Setenv("HELLNET_TELEMETRY_SERVICE_VERSION", "test")
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", "")
 	t.Setenv("HELLNET_ENDPOINT", "")
-	tel, err := New()
+	tel, err := New(context.Background())
 	if err != nil {
 		t.Fatalf("New() retornou erro: %v", err)
 	}
@@ -46,22 +46,22 @@ func TestMustNew(t *testing.T) {
 	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
 	t.Setenv("HELLNET_TELEMETRY_SERVICE_VERSION", "test")
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", "")
-	tel := MustNew()
+	tel := MustNew(context.Background())
 	if tel == nil {
 		t.Fatal("MustNew() retornou nil")
 	}
 	_ = tel.Close()
 }
 
-// NewWithContext keeps configuration explicit and does not implicitly load a
+// NewWithOptions keeps configuration explicit and does not implicitly load a
 // local .env file.
-func TestNewWithContextUsesExplicitOptions(t *testing.T) {
-	tel, err := NewWithContext(context.Background(), Options{
+func TestNewWithOptionsUsesExplicitOptions(t *testing.T) {
+	tel, err := NewWithOptions(context.Background(), Options{
 		ServiceName:  "test-svc",
 		OTLPEndpoint: "http://test-collector:4318",
 	})
 	if err != nil {
-		t.Fatalf("NewWithContext() erro: %v", err)
+		t.Fatalf("NewWithOptions() erro: %v", err)
 	}
 	defer tel.Close()
 	if tel.otlpEndpoint != "http://test-collector:4318" {
@@ -378,7 +378,7 @@ func TestProfilesStartIntegration(t *testing.T) {
 		t.Skip("defina ALLOY_ENDPOINT para rodar a integração real com o Pyroscope/Alloy")
 	}
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
-	tel := MustNew() // auto-inicia ProfilesStart() internamente
+	tel := MustNew(context.Background()) // auto-inicia ProfilesStart() internamente
 	defer tel.Close()
 	if tel.profiler == nil {
 		t.Fatal("profiler não iniciou automaticamente no New()")
@@ -397,7 +397,7 @@ func TestAlloyIntegration(t *testing.T) {
 	}
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
 	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
-	tel := MustNew()
+	tel := MustNew(context.Background())
 	defer tel.Close()
 
 	tel.Log().Info("integration test log", "ok", true)

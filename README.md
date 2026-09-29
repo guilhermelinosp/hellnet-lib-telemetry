@@ -47,7 +47,8 @@ Telemetria é a **torre de controle** + um painelzinho de instrumentos na sua fr
 ### Primeiras linhas
 
 ```go
-	tel, err := telemetry.New() // sem parâmetros: lê HELLNET_* e OTEL_*
+ctx := context.Background()
+tel, err := telemetry.New(ctx) // lê HELLNET_* e OTEL_*
 defer func() { _ = tel.Close() }() // desliga na ordem certa, sem perder relatórios
 mux.Handle("/", telemetry.Middleware(tel, meuHandler)) // o porteiro anota cada request
 ```
@@ -62,14 +63,16 @@ As próximas seções mostram o detalhe técnico completo de cada peça.
 package main
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/guilhermelinosp/hellnet-lib-telemetry/telemetry"
 )
 
 func main() {
-	// Sem parâmetros: a lib lê HELLNET_TELEMETRY_* / HELLNET_* / OTEL_*.
-	tel, err := telemetry.New()
+	ctx := context.Background()
+	// O contexto é explícito; a lib lê HELLNET_TELEMETRY_* / HELLNET_* / OTEL_*.
+	tel, err := telemetry.New(ctx)
 	if err != nil {
 		panic(err)
 	}
@@ -109,11 +112,11 @@ padrão **`OTEL_*`**, nessa ordem de precedência.
 
 ### De ambiente (sem parâmetros)
 
-`New()` **não recebe parâmetros**. Ela lê as variáveis `HELLNET_*` legadas e
+`New(ctx)` recebe o contexto raiz da aplicação e lê as variáveis `HELLNET_*` legadas e
 as variáveis padrão do OpenTelemetry:
 
 ```go
-tel, _ := telemetry.New()
+tel, _ := telemetry.New(context.Background())
 ```
 
 Precedência: `HELLNET_TELEMETRY_*`, `HELLNET_*`, depois `OTEL_*`. Os headers
@@ -141,7 +144,7 @@ Os três sinais (trace + metrics + logs) estão **sempre ligados** por padrão.
 Não há toggle para desligá-los:
 
 ```go
-tel, _ := telemetry.New()
+tel, _ := telemetry.New(context.Background())
 ```
 
 Os providers são registrados no estado global do otel; logs usam Zap e métricas
@@ -623,7 +626,7 @@ trace.Span("operation", func(ctx context.Context) error {
 
 O profiling usa somente push para Pyroscope:
 
-1. **Push → Pyroscope** (contínuo): inicia sozinho no `New()` quando há
+1. **Push → Pyroscope** (contínuo): inicia sozinho no `New(ctx)` quando há
    `HELLNET_TELEMETRY_ENDPOINT`. O endpoint é **derivado do mesmo endpoint OTLP**:
    - In-cluster (`http://alloy:4318`) → `http://alloy:9999` (porta do `pyroscope.receive_http`)
    - Gateway (`https://alloy.hellnet.com.br`) → `https://alloy.hellnet.com.br/ingest`
@@ -649,8 +652,8 @@ O profiling usa somente push para Pyroscope:
 
 | Function | Description |
 |---|---|
-| `telemetry.New()` | Setup all-in-one (sem parâmetros): lê `HELLNET_*` e `OTEL_*` |
-| `telemetry.MustNew()` | Como `New`, mas entra em pânico em erro |
+| `telemetry.New(ctx)` | Setup all-in-one: lê `HELLNET_*` e `OTEL_*` |
+| `telemetry.MustNew(ctx)` | Como `New`, mas entra em pânico em erro |
 | `telemetry.Middleware(tel, handler)` | HTTP tracing + request metrics + logging (request-scoped) |
 | `tel.Live()` / `tel.Ready()` / `tel.Health()` | Health probes (`http.Handler`) |
 | `tel.HealthRegister(name, fn)` | Custom health check — ctx **fornecido pela lib** |
