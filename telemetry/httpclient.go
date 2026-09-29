@@ -3,15 +3,17 @@ package telemetry
 import (
 	"context"
 	"io"
-	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
+	"go.uber.org/zap"
 )
 
 // ─────────────── HTTP client instrumentado (outbound) ───────────────
@@ -29,8 +31,8 @@ import (
 //	client.Transport = clientRetryTransport{next: otelhttp.NewTransport(inner)}
 //
 // O contexto usado nas tentativas deriva de req.Context() (linhagem que o
-// caller tiver — ex.: filho do span atual dentro de WithSpan). NÃO há prazo
-// total derivado do baseCtx deliberadamente: quem chama controla o ciclo via
+// caller tiver — ex.: filho do span atual dentro de Trace(ctx).Span). NÃO há prazo
+// total derivado de um contexto interno deliberadamente: quem chama controla o ciclo via
 // ctx próprio da request.
 
 const (
@@ -39,13 +41,10 @@ const (
 	// defaultHTTPMaxRetries: 2 retries ⇒ até 3 tentativas por chamada.
 	defaultHTTPMaxRetries = 2
 	// defaultHTTPRetryBackoff é o delay inicial entre tentativas (dobra a cada
-	// retry, com teto maxHTTPRetryBackoff e jitter ±retryJitterFraction).
+	// retry, com teto maxHTTPRetryBackoff e full jitter).
 	defaultHTTPRetryBackoff = 100 * time.Millisecond
 	// maxHTTPRetryBackoff é o teto do delay entre tentativas.
 	maxHTTPRetryBackoff = 5 * time.Second
-	// retryJitterFraction é a amplitude do jitter ±20% aplicado ao delay
-	// (evita sincronização de retries entre chamadas concorrentes).
-	retryJitterFraction = 0.20
 )
 
 // clientMetrics agrega as primitivas OTel emitidas POR TENTATIVA. Os nomes
@@ -82,14 +81,15 @@ type HTTPOption func(*httpClientConfig)
 // vinculado ao ctx da tentativa após RoundTrip retornar (streaming); ele é
 // invocado ao sobrepor a tentativa e em qualquer falha final.
 type attemptResult struct {
-	resp     *http.Response
-	err      error
-	status   int                // 0 quando err != nil
-	elapsed  time.Duration      // duração da passagem pelo transporte
-	ctx      context.Context    // ctx da tentativa (linhagem p/ métricas)
-	cancel   context.CancelFunc // cancel do deadline desta tentativa
-	attempts int                // nº total de tentativas executadas (preenchido no fim)
-	fatal    bool               // erro que NÃO pode ser retentado (ex.: falha ao reconstruir corpo)
+	resp       *http.Response
+	err        error
+	status     int                // 0 quando err != nil
+	elapsed    time.Duration      // duração da passagem pelo transporte
+	ctx        context.Context    // ctx da tentativa (linhagem p/ métricas)
+	cancel     context.CancelFunc // cancel do deadline desta tentativa
+	attempts   int                // nº total de tentativas executadas (preenchido no fim)
+	fatal      bool               // erro que NÃO pode ser retentado (ex.: falha ao reconstruir corpo)
+	retryAfter time.Duration      // atraso sugerido pelo servidor
 }
 
 // clientRetryTransport envelopa o transporte instrumentado (otelhttp) com
@@ -128,7 +128,7 @@ func WithMaxRetries(n int) HTTPOption {
 }
 
 // WithRetryBackoff define o delay inicial entre tentativas (default 100ms),
-// dobrando a cada retry até o teto de 5s, sempre com jitter ±20%.
+// dobrando a cada retry até o teto de 5s, com full jitter.
 func WithRetryBackoff(base time.Duration) HTTPOption {
 	return func(c *httpClientConfig) {
 		if base > 0 {
@@ -159,13 +159,13 @@ func WithExtraTransport(rt http.RoundTripper) HTTPOption {
 //     clientMetrics), reusando o meter adapter do Telemetry;
 //   - timeout por tentativa (WithBaseTimeout); o Client não impõe Timeout
 //     global — o prazo total é o ctx passado pelo caller na request;
-//   - log WARN via slog quando TODAS as tentativas falham (correlacionado à
+//   - log WARN via Zap quando TODAS as tentativas falham (correlacionado à
 //     linhagem de ctx da request, via caminho logIn do Telemetry).
 //
 // Exemplo:
 //
 //	client := tel.HTTPClient(telemetry.WithBaseTimeout(5*time.Second))
-//	err := tel.WithSpan("sync-upstream", func(ctx context.Context) error {
+//	err := tel.Trace(ctx).Span("sync-upstream", func(ctx context.Context) error {
 //		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 //		resp, err := client.Do(req) // traz traceparent automaticamente
 //		if err != nil {
@@ -206,7 +206,7 @@ func (t *Telemetry) HTTPClient(opts ...HTTPOption) *http.Client {
 		Transport: &clientRetryTransport{
 			next: otelhttp.NewTransport(inner, httpOpts...),
 			cfg:  cfg,
-			m:    newClientMetrics(t.Meter),
+			m:    newClientMetrics(t.meter),
 			tel:  t,
 		},
 	}
@@ -223,12 +223,12 @@ func cloneDefaultTransport() http.RoundTripper {
 
 // newClientMetrics cria as métricas do client no meter informado. Nil-safe
 // (Telemetry construído manualmente sem meter ⇒ métricas silenciadas).
-func newClientMetrics(m Meter) *clientMetrics {
+func newClientMetrics(m metric.Meter) *clientMetrics {
 	if m == nil {
 		return &clientMetrics{}
 	}
 	cm := &clientMetrics{}
-	cm.requestsTotal, _ = m.Counter("http_client_requests_total")
+	cm.requestsTotal, _ = m.Int64Counter("http_client_requests_total")
 	cm.requestDuration, _ = m.Float64Histogram(
 		"http_client_request_duration_seconds",
 		metric.WithDescription("Duração de requests HTTP de saída em segundos"),
@@ -278,20 +278,37 @@ func outcomeLabel(willRetry bool, err error, statusCode int) string {
 	}
 }
 
-// retryDelay calcula o delay antes do próximo retry: base dobrada `attempt`
-// vezes com jitter ±retryJitterFraction, SEMPRE limitado ao teto
-// maxHTTPRetryBackoff (aplicado após o jitter).
+// retryDelay calcula o delay com exponential backoff e full jitter.
 func retryDelay(base time.Duration, attempt int) time.Duration {
 	d := base
 	for i := 0; i < attempt && d < maxHTTPRetryBackoff; i++ {
-		d *= 2
+		if d > maxHTTPRetryBackoff/2 {
+			d = maxHTTPRetryBackoff
+		} else {
+			d *= 2
+		}
 	}
-	// Jitter de suavização de carga — sem propósito criptográfico.
-	jittered := time.Duration(float64(d) * (1 - retryJitterFraction + rand.Float64()*2*retryJitterFraction)) // #nosec G404
-	if jittered > maxHTTPRetryBackoff || jittered <= 0 {
-		return maxHTTPRetryBackoff
+	if d <= 0 {
+		return 0
 	}
-	return jittered
+	// #nosec G404 -- retry jitter does not require cryptographic randomness.
+	return time.Duration(rand.Int64N(int64(d) + 1))
+}
+
+func retryAfterDelay(resp *http.Response) time.Duration {
+	if resp == nil {
+		return 0
+	}
+	value := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		if delay := time.Until(when); delay > 0 {
+			return delay
+		}
+	}
+	return 0
 }
 
 // RoundTrip executa a cadeia de tentativas (métodos idempotentes) ou uma
@@ -306,12 +323,12 @@ func (rt *clientRetryTransport) RoundTrip(req *http.Request) (*http.Response, er
 	// Log de falha FINAL (todas as tentativas esgotadas), correlacionado ao
 	// ctx da request (herda trace_id da linhagem do caller nos sinks).
 	if res.err != nil {
-		rt.tel.logIn(req.Context(), slog.LevelWarn, "http client request failed",
-			slog.String("method", req.Method),
-			slog.String("host", targetHost(req)),
-			slog.Int("attempts", res.attempts),
-			slog.Duration("duration", time.Since(start)),
-			slog.String("error", res.err.Error()),
+		rt.tel.logIn(req.Context(), zap.WarnLevel, "http client request failed",
+			zap.String("method", req.Method),
+			zap.String("host", targetHost(req)),
+			zap.Int("attempts", res.attempts),
+			zap.Duration("duration", time.Since(start)),
+			zap.String("error", res.err.Error()),
 		)
 	}
 	return res.resp, res.err
@@ -364,9 +381,23 @@ func (rt *clientRetryTransport) executeAttempts(req *http.Request) attemptResult
 		drainResponse(&res)
 		pendingCancel = res.cancel
 
+		delay := retryDelay(rt.cfg.retryBackoff, attempt)
+		if res.retryAfter > delay {
+			delay = res.retryAfter
+		}
+		if delay > maxHTTPRetryBackoff {
+			delay = maxHTTPRetryBackoff
+		}
+		timer := time.NewTimer(delay)
 		select {
-		case <-time.After(retryDelay(rt.cfg.retryBackoff, attempt)):
+		case <-timer.C:
 		case <-req.Context().Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			// Caller desistiu durante o backoff: encerra propagaando o motivo
 			// real — nunca resposta vazia com err=nil.
 			pendingCancel()
@@ -435,6 +466,7 @@ func (rt *clientRetryTransport) tryOnce(req *http.Request, reqAttrs []attribute.
 	}
 	if err == nil && resp != nil {
 		res.status = resp.StatusCode
+		res.retryAfter = retryAfterDelay(resp)
 	}
 	rt.decrementInflight(actx, reqAttrs)
 	return res

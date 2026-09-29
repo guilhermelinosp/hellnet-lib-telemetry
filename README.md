@@ -1,12 +1,12 @@
 # hellnet-lib-telemetry
 
 Opinionated OpenTelemetry observability library for Go services — traces,
-metrics and logs out of the box, in the spirit of .NET `prometheus-net`
+metrics and logs out of the box.
 (automatic runtime/process metrics, HTTP, DB, workers, error rate).
 
 All three signals are exported via **OTLP over HTTP** (`otlploghttp` /
-`otlpmetrichttp` / `otlptracehttp`). A Prometheus `/metrics` scrape endpoint is
-also available locally for inspection (no collector required).
+`otlpmetrichttp` / `otlptracehttp`). Não há endpoint local de scrape: métricas
+são exportadas exclusivamente via OTLP.
 
 ---
 
@@ -42,13 +42,14 @@ Telemetria é a **torre de controle** + um painelzinho de instrumentos na sua fr
 | **OTLP/collector** | A central que recebe os relatórios de todas as torres |
 | **middleware** | O porteiro que anota quem chegou antes de qualquer coisa acontecer |
 | **healthcheck** | A pergunta "tá tudo bem?", respondida por `/live`, `/ready` e `/health` |
-| **baseCtx** | O mapa-múndi da aplicação: raiz (`context.Background()`) mantida internamente pela lib; todos os relatórios herdam dele |
+| **context** | O vínculo da operação; APIs context-first preservam a linhagem distribuída |
 
 ### Primeiras linhas
 
 ```go
-tel, err := telemetry.New() // sem parâmetros: lê HELLNET_* e usa context.Background() como base
-defer func() { _ = tel.Close() }() // desliga na ordem certa, sem perder relatórios
+ctx := context.Background()
+tel, err := telemetry.New(ctx) // lê HELLNET_* e OTEL_*
+defer func() { _ = tel.Close(ctx) }() // desliga na ordem certa, sem perder relatórios
 mux.Handle("/", telemetry.Middleware(tel, meuHandler)) // o porteiro anota cada request
 ```
 
@@ -62,25 +63,25 @@ As próximas seções mostram o detalhe técnico completo de cada peça.
 package main
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/guilhermelinosp/hellnet-lib-telemetry/telemetry"
 )
 
 func main() {
-	// Sem parâmetros: a lib lê TELEMETRY_* / HELLNET_* do ambiente e
-	// usa context.Background() como contexto-base (baseCtx) internamente.
-	tel, err := telemetry.New()
+	ctx := context.Background()
+	// O contexto é explícito; a lib lê HELLNET_TELEMETRY_* / HELLNET_* / OTEL_*.
+	tel, err := telemetry.New(ctx)
 	if err != nil {
 		panic(err)
 	}
-	defer tel.Close()
+	defer tel.Close(ctx)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /live", tel.Live())
 	mux.Handle("GET /ready", tel.Ready())
 	mux.Handle("GET /health", tel.Health())
-	mux.Handle("GET /metrics", tel.MetricsHandler()) // Prometheus scrape (opcional)
 
 	http.ListenAndServe(":8080", telemetry.Middleware(tel, mux))
 }
@@ -90,22 +91,20 @@ func main() {
 
 ## Required environment variables
 
-A lib usa **`HELLNET_SERVICE`** e **`HELLNET_ENVIRONMENT`** como envs canônicas
-do processo. As envs **`TELEMETRY_*`** permanecem como fallback de
-retrocompatibilidade ou para configurações específicas de telemetria.
+A lib aceita **`HELLNET_TELEMETRY_*`**, o antigo **`HELLNET_*`** e os nomes
+padrão **`OTEL_*`**, nessa ordem de precedência.
 
 | Variable | Example | Description |
 |---|---|---|
-| `HELLNET_SERVICE` | `order-api` | Service identifier (required) |
-| `TELEMETRY_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (required). **A porta deve vir junto do endpoint** (ex.: `:4318` ou `:443`); não há variável de porta separada. Se a porta for omitida, é inferida do scheme (443 p/ https, 80 p/ http) |
-| `HELLNET_ENVIRONMENT` | `Development` | Ambiente (**opcional**); usado como atributo de resource (`deployment.environment`) |
+| `HELLNET_TELEMETRY_SERVICE` / `OTEL_SERVICE_NAME` | `order-api` | Service identifier (default `telemetry`) |
+| `HELLNET_TELEMETRY_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://alloy.monitoring:4318` | OTLP collector endpoint (optional) |
+| `HELLNET_TELEMETRY_ENVIRONMENT` | `Development` | Ambiente (**opcional**); usado como atributo de resource (`deployment.environment`) |
 
-> Apenas `SERVICE` e `ENDPOINT` são obrigatórios. A porta **não** é configurável via env separada — ela vive no `ENDPOINT`. Não há carregamento de arquivo `.env`.
+> O endpoint é opcional: vazio desliga a exportação OTLP, mantendo logs locais.
 
-> **Endpoint vazio**: se `TELEMETRY_ENDPOINT` (ou `TELEMETRY_ENDPOINT`) não
-> for definido, o export OTLP é desligado (logs ficam só em stdout; métricas só
-> em `/metrics` Prometheus; traces não exportam) — em vez de tentar exportar para
-> uma URL inválida.`
+> **Endpoint vazio**: se `HELLNET_TELEMETRY_ENDPOINT` (ou `HELLNET_ENDPOINT`) não
+> for definido, o export OTLP é desligado (logs ficam só em stdout; métricas e
+> traces não exportam) — em vez de tentar exportar para uma URL inválida.`
 
 ---
 
@@ -113,24 +112,31 @@ retrocompatibilidade ou para configurações específicas de telemetria.
 
 ### De ambiente (sem parâmetros)
 
-`New()` **não recebe parâmetros** — a lib lê as envs
-`TELEMETRY_*` / `HELLNET_*` e usa `context.Background()` como
-contexto-base (`baseCtx`):
+`New(ctx)` recebe o contexto raiz da aplicação e lê as variáveis `HELLNET_*` legadas e
+as variáveis padrão do OpenTelemetry:
 
 ```go
-tel, _ := telemetry.New() // lê TELEMETRY_* / HELLNET_*
+tel, _ := telemetry.New(context.Background())
 ```
 
-### Application context (baseCtx)
+Precedência: `HELLNET_TELEMETRY_*`, `HELLNET_*`, depois `OTEL_*`. Os headers
+OTLP podem ser informados em `OTEL_EXPORTER_OTLP_HEADERS` ou em
+`Options.OTLPHeaders` como `key=value,key2=value2`. Sampling usa
+`OTEL_TRACES_SAMPLER` (`always_on`, `always_off` ou `traceidratio`) e
+`OTEL_TRACES_SAMPLER_ARG`.
 
-A lib mantém um contexto-base (`baseCtx`) internamente, derivado de
-`context.Background()` na construção. Nenhum método da lib recebe ctx de app.
+### Application context
 
-Consequência de correlação: traces de aplicação formam **uma única linhagem**
-com raiz no `baseCtx` (`WithSpan`/`Worker` criam filhos sob ele; o ctx derivado
-é repassado ao callback para continuação por código otel-instrumentado).
-Traces request-scoped extraídos pelo **Middleware** permanecem independentes —
-origem são os requests inbound (comportamento server-side correto).
+Prefira APIs context-first para preservar a linhagem distribuída. As variantes
+sem contexto continuam disponíveis para jobs sem contexto de entrada:
+
+```go
+err := tel.Trace(ctx).Span("process-order", func(ctx context.Context) error {
+	return process(ctx, order)
+})
+tel.Log(ctx).Info("processing")
+err = tel.WorkerContext(ctx, "reconcile", run)
+```
 
 ### Sempre ligado
 
@@ -138,11 +144,11 @@ Os três sinais (trace + metrics + logs) estão **sempre ligados** por padrão.
 Não há toggle para desligá-los:
 
 ```go
-tel, _ := telemetry.New()
+tel, _ := telemetry.New(context.Background())
 ```
 
-Os providers são registrados no estado global do otel/slog automaticamente
-(runtime metrics e exporter Prometheus `/metrics` inclusos).
+Os providers são registrados no estado global do otel; logs usam Zap e métricas
+são exportadas exclusivamente via OTLP.
 
 ---
 
@@ -153,7 +159,7 @@ Os providers são registrados no estado global do otel/slog automaticamente
 | Endpoint | Handler | Purpose |
 |---|---|---|
 | `GET /live` | `tel.Live()` | Liveness probe — always 200 |
-| `GET /ready` | `tel.Ready()` | Readiness — self + OTLP collector TCP dial |
+| `GET /ready` | `tel.Ready()` | Readiness — self + custom application checks |
 | `GET /health` | `tel.Health()` | Aggregate — `ok`/`degraded` with all checks |
 
 ```go
@@ -169,15 +175,16 @@ mux.Handle("GET /health", tel.Health())
   "status": "ready",
   "checks": [
     {"name": "self", "status": "pass"},
-    {"name": "otlp-collector", "status": "pass"}
+    {"name": "postgres", "status": "pass"}
   ]
 }
 ```
 
 ### Custom health checks
 
-Além de `self` e do collector OTLP, registre dependências (DB, redis,
-downstream). Qualquer falha marca o serviço `not ready` / `degraded`:
+Registre dependências (DB, redis, downstream). `/ready` verifica apenas `self`
+e os checks da aplicação; o collector OTLP é informativo em `/health` e não
+remove o serviço da rotação:
 
 ```go
 tel.HealthRegister("postgres", func(ctx context.Context) error {
@@ -194,17 +201,17 @@ Métricas produzidas: `healthcheck_status{check,status}`,
 
 > 🧒 **Entenda com 15 anos:** GPS etapa-por-etapa — dá pra ver por onde o pedido passou e onde demorou.
 
-Fluxo padrão (ctx-free — span derivado do contexto-base, repassado ao callback):
+Fluxo recomendado (context-first):
 
 ```go
-err := tel.WithSpan("process-order", func(ctx context.Context) error {
+err := tel.Trace(ctx).Span("process-order", func(ctx context.Context) error {
 	// ctx contém o span; código otel-instrumentado continua a linhagem
 	return process(ctx, order)
 })
 // em erro: span marcado com status=Error + RecordError
 ```
 
-> `WithSpan` **recupera panics**: marca o span como erro, incrementa
+> `Trace(ctx).Span` **recupera panics**: marca o span como erro, incrementa
 > `exceptions_total{span,kind=panic}` e **re-propaga o panic** (comportamento
 > original preservado).
 
@@ -214,12 +221,9 @@ Precisa enraizar um span num ctx próprio? Use a superfície explícita com ctx
 (documentada como interna/avançada; fora do fluxo padrão de correlação):
 
 ```go
-ctx, span := tel.Trace().Start(parentCtx, "operation-name",
-	trace.WithAttributes(attribute.String("order.id", "123")))
-defer span.End()
-
-span.AddEvent("validation-started")
-span.SetAttributes(attribute.Int("items.count", 5))
+err := tel.Trace(parentCtx).Span("operation-name", func(ctx context.Context) error {
+	return validate(ctx)
+})
 ```
 
 ---
@@ -235,51 +239,37 @@ três formas de métricas:
    catálogo abaixo.
 2. **Instrumentação de cliente HTTP** (`tel.HTTPClient`) — automática ao usar o
    `http.Client` retornado.
-3. **Customizadas** — crie contadores/histogramas/gauges via `tel.Meter` (ou
-   `tel.Metric()`).
+3. **Customizadas** — crie contadores/histogramas/gauges via `tel.Metric(ctx)`.
 
 ### Custom metrics
 
 ```go
 // Counter (atalho int64, sem opts)
-requestsTotal, _ := tel.Meter.Counter("http.requests.total")
+requestsTotal, _ := tel.RawMeter().Counter("http.requests.total")
 requestsTotal.Add(ctx, 1, metric.WithAttributes(
 	attribute.String("method", "GET"),
 	attribute.String("path", "/api/users"),
 ))
 
 // Histogram
-requestDuration, _ := tel.Meter.Float64Histogram("http.request.duration")
+requestDuration, _ := tel.RawMeter().Float64Histogram("http.request.duration")
 requestDuration.Record(ctx, 0.123, metric.WithAttributes(
 	attribute.String("method", "GET"),
 ))
 
 // Observable Gauge (callback-based)
-activeConns, _ := tel.Meter.Int64ObservableGauge("http.connections.active")
-tel.Meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+activeConns, _ := tel.RawMeter().Int64ObservableGauge("http.connections.active")
+tel.RawMeter().RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 	o.ObserveInt64(activeConns, getActiveCount())
 	return nil
 }, activeConns)
 
 // Gauge (atalho int64)
-queueGauge, _ := tel.Meter.Gauge("queue.depth")
+queueGauge, _ := tel.RawMeter().Gauge("queue.depth")
 queueGauge.Record(ctx, int64(q))
-hist, _ := tel.Meter.Histogram("http_duration_ms")
+hist, _ := tel.RawMeter().Histogram("http_duration_ms")
 defer func(start time.Time) { hist.Record(ctx, time.Since(start).Milliseconds()) }(time.Now())
 ```
-
-### Prometheus `/metrics` endpoint
-
-O exporter Prometheus vem **sempre ligado** (anexado à **mesma** `MeterProvider`
-usada pelo OTLP). Exponha `tel.MetricsHandler()` (um `http.Handler`) em qualquer
-rota para inspecionar everything localmente:
-
-```go
-mux.Handle("GET /metrics", tel.MetricsHandler())
-```
-
-O que aparece em `/metrics` é exatamente o que é enviado ao OTLP (mesma
-agregação do SDK, dois readers no mesmo provider).
 
 ### Catálogo de métricas automáticas
 
@@ -318,10 +308,9 @@ agregação do SDK, dois readers no mesmo provider).
 
 **Erros / exceções (automáticas):**
 
-- `log_errors_total{level}` — qualquer log slog com nível ≥ Error (via handler
-  interno; basta usar `tel.Logger.Error(...)`)
+- `log_errors_total{level}` — qualquer log Zap com nível ≥ Error.
 - `http_server_errors_total{method}` — respostas HTTP com status ≥ 400
-- `exceptions_total{span,kind}` — panics recuperados em `WithSpan`
+- `exceptions_total{span,kind}` — panics recuperados em `Trace(ctx).Span`
 
 **Runtime / processo (LIGADO POR PADRÃO quando metrics habilitado):**
 
@@ -338,21 +327,8 @@ Conjunto clássico (SDK observables):
 - CPU/geral: `process_cpu_usage_percent`, `process_cpu_usage_ratio`, `process_num_cpu`,
   `process_uptime_seconds`, `process_open_fds` *(Linux)*, `process_threads` *(Linux)*
 
-Conjunto detalhado (`runtime/metrics`, nível prometheus-net):
-
-- Memória: `process_heap_live_bytes`, `process_heap_free_bytes`,
-  `process_gc_heap_goal_bytes`, `process_gc_heap_limit_bytes`,
-  `process_mem_heap_objects_bytes`, `process_mem_heap_stacks_bytes`,
-  `process_mem_metadata_mcache_free_bytes`, `process_mem_metadata_mcache_inuse_bytes`,
-  `process_mem_metadata_other_bytes`, `process_mem_os_stacks_bytes`,
-  `process_mem_other_bytes`, `process_mem_profiling_buckets_bytes`
-- Mutex: `process_mutex_wait_seconds_total`, `process_mutex_lock_seconds_total`
-- CPU por classe (segundos): `process_cpu_gc_seconds_total`,
-  `process_cpu_gc_mark_assist_seconds_total`, `process_cpu_gc_mark_dedicated_seconds_total`,
-  `process_cpu_gc_mark_idle_seconds_total`, `process_cpu_gc_sweep_assist_seconds_total`,
-  `process_cpu_gc_sweep_dedicated_seconds_total`, `process_cpu_gc_sweep_idle_seconds_total`,
-  `process_cpu_scavenge_seconds_total`, `process_cpu_total_seconds_total`,
-  `process_cpu_user_seconds_total`, `process_cpu_idle_seconds_total`
+O conjunto acima é a única fonte customizada de métricas de runtime da lib;
+ela não registra uma segunda instrumentação `runtime/metrics` em paralelo.
 
 > ⚠️ `process_cpu_usage_percent`, `process_cpu_usage_ratio`, `process_open_fds` e
 > `process_threads` dependem de `/proc` e **só são emitidos em Linux**. Em macOS
@@ -393,9 +369,8 @@ avg(process_cpu_usage_percent)
 ```
 
 > ⚠️ **Pré-requisito para `histogram_quantile`**: o histograma precisa chegar no
-> Prometheus como **histograma clássico** (série `_bucket`). Se o coletor exportar
-> como native/exponential histogram, habilite native histograms no Prometheus 3.x
-> (ou force histograma clássico no exporter de Prometheus).
+> O collector pode converter o histograma OTLP para o formato adequado ao
+> backend de métricas utilizado.
 
 ### Por que não há métrica `p99` pronta?
 
@@ -410,24 +385,36 @@ No OpenTelemetry percentis **não são emitidos** — o que sai é um histograma
 
 > 🧒 **Entenda com 15 anos:** diário de bordo — "às 10h03 aconteceu X", registrado na hora.
 
-Usa `log/slog` com saída dupla: **stdout (JSON)** + **OTLP → Loki**.
+Usa `go.uber.org/zap` com saída dupla: **stdout (JSON)** + **OTLP → Loki**.
 
 ```go
-tel.Log().Info("order created",
+tel.Log(ctx).Info("order created",
 	"order_id", "123", "customer_id", "456", "amount", 99.90)
 
-tel.Log().Warn("rate limit approaching", "current", 95, "limit", 100)
+tel.Log(ctx).Warn("rate limit approaching", "current", 95, "limit", 100)
 
-tel.Log().Error("payment failed", "order_id", "123", "error", err)
+tel.Log(ctx).Error("payment failed", "order_id", "123", "error", err)
 
 // Debug só aparece se LogLevel=Debug
-tel.Log().Debug("cache hit", "key", "user:123")
+tel.Log(ctx).Debug("cache hit", "key", "user:123")
+
+tel.Log(ctx).Trace("cache lookup detail", "key", "user:123")
+tel.Log(ctx).Critical("data integrity failure", "table", "orders")
 ```
 
-> A abstração `Log()` não recebe ctx: a correlação trace→log usa o
-> contexto-base internamente. Para correlação request-scoped, os logs do
-> Middleware já fazem isso automaticamente (via span do request). O campo cru
-> `tel.Logger` (*slog.Logger) continua disponível para quem precisa de ctx.
+Níveis exportados: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` e `CRITICAL`.
+`Trace` exige `LogLevel <= -8`; `Debug` exige `LogLevel <= Debug`.
+`Critical` registra severidade alta, mas não encerra o processo; o bootstrap da
+aplicação decide quando terminar.
+
+Para preservar correlação em código request-scoped, use:
+
+```go
+tel.Log(ctx).Error("request failed", "error", err)
+```
+
+`Log(ctx)` preserva a correlação request-scoped.
+`tel.Logger` é um `*zap.SugaredLogger`.
 
 **stdout:**
 
@@ -435,16 +422,16 @@ tel.Log().Debug("cache hit", "key", "user:123")
 {"time":"2026-01-15T10:30:00.123Z","level":"INFO","msg":"order created","order_id":"123","customer_id":"456","amount":99.9}
 ```
 
-### Redação de logs (PII)
+O corpo de cada registro OTLP também é emitido como JSON, mantendo os mesmos
+campos como atributos OTLP. Isso permite que o Grafana/Loki detecte os campos
+na visualização JSON sem perder structured metadata.
 
-Mascara valores de atributos sensíveis (`password`, `token`, `secret`,
-`authorization`, `api_key`, ...) no stdout **e** no sink OTLP:
+### Segurança
 
-```go
-opts.RedactSensitive = true
-// ou chaves customizadas:
-opts.RedactKeys = []string{"session_id"}
-```
+Não registre tokens, senhas ou PII nos argumentos de log. `/metrics` e
+`/debug/pprof` não são criados automaticamente por esta biblioteca; monte
+qualquer endpoint administrativo em listener protegido e separado da porta
+pública da aplicação.
 
 ---
 
@@ -500,7 +487,7 @@ client := tel.HTTPClient(
 	telemetry.WithMaxRetries(2),
 )
 
-err := tel.WithSpan("sync-upstream", func(ctx context.Context) error {
+err := tel.Trace(ctx).Span("sync-upstream", func(ctx context.Context) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
 		"https://api.example.com/orders", nil)
 	resp, err := client.Do(req) // traz traceparent automaticamente
@@ -532,8 +519,53 @@ err := tel.WithSpan("sync-upstream", func(ctx context.Context) error {
 observabilidade automática (trace + métricas + log) sem boilerplate. O erro de
 `fn` é repassado, então o caller decide retry/backoff.
 
+## Resiliência
+
+O pacote `resilience` fornece primitivas independentes de domínio para
+compor chamadas externas e jobs:
+
+- `Retry` — limite de tentativas, backoff exponencial, jitter e cancelamento
+  por contexto;
+- `CircuitBreaker` — estados `closed`, `open` e `half-open`, com limiar de
+  falhas e janela de recuperação;
+- `Bulkhead` — limite de concorrência com rejeição rápida quando cheio;
+- `Fallback` e `Timeout` — degradação explícita e limite do orçamento da chamada;
+- `Chain` e `Do[T]` — composição de políticas com resultado tipado.
+
+Exemplo:
+
 ```go
-err := tel.Worker("process_order",
+breaker := &resilience.CircuitBreaker{
+    Threshold:   5,
+    OpenTimeout: 30 * time.Second,
+}
+policy := resilience.Chain(
+    resilience.Fallback(func(ctx context.Context, err error) error {
+        return serveFromCache(ctx, err)
+    }),
+    breaker.Policy(),
+    resilience.Retry(resilience.RetryConfig{
+        MaxAttempts: 3,
+        BaseDelay:   100 * time.Millisecond,
+        MaxDelay:    2 * time.Second,
+        Jitter:      0.20,
+        ShouldRetry: isTransient,
+    }),
+    resilience.Bulkhead(20),
+    resilience.Timeout(2*time.Second),
+)
+
+order, err := resilience.Do(ctx, policy, func(ctx context.Context) (*Order, error) {
+    return callDependency(ctx)
+})
+```
+
+A ordem recomendada é `bulkhead → circuit breaker → retry → timeout →
+operação`. A aplicação decide o fallback e a classificação de erros; a lib
+não repete automaticamente erros de negócio.
+
+```go
+err := tel.WorkerContext(ctx, "process_order",
 	func(ctx context.Context) error {
 		return process(ctx, msg)
 	},
@@ -570,63 +602,26 @@ Métricas: `db_sql_*` (veja catálogo acima), particionadas por `db=name`.
 Sempre chame para flush dos buffers:
 
 ```go
-defer tel.Close() // timeout interno de 5s; força flush OTLP + Prometheus
+defer tel.Close(ctx) // timeout interno de 5s; força flush OTLP
 ```
 
 ---
 
-## Abstração (`Client` interface)
+## API principal
 
-Para DI/mock, use a abstração em vez dos campos crus. O tipo **não aparece no
-nome do método** — `int64`/`float64` é resolvido no acessor (`Int64()`/`Float64()`)
-e os métodos são `Counter`/`Gauge`/`Histogram` agnósticos (genéricos).
+Use o contexto da operação diretamente nas três fachadas:
 
 ```go
-var c telemetry.Client = tel
+logger := tel.Log(ctx)
+metric := tel.Metric(ctx)
+trace := tel.Trace(ctx)
 
-// Metrics — tel.Meter expõe Counter/Gauge/Histogram (int64, nome sem tipo)
-// + toda a superfície crua de metric.Meter (Float64*, Observable*, RegisterCallback).
-counter, _ := c.Metric().Counter("req_total")
-counter.Add(ctx, 1)
-c.Metric().Gauge("queue").Record(ctx, int64(q))
-c.Metric().Histogram("latency").Record(ctx, d.Milliseconds())
-c.Metric().Float64Histogram("latency_s").Record(ctx, d.Seconds())
-
-// também direto no tel (sem passar pelo Client):
-tel.Meter.Counter("hellnet_smoke_ops_total")
-
-// Traces (escape hatch avançado; fluxo padrão é tel.WithSpan)
-_, span := c.Trace().Start(parentCtx, "order")
-defer span.End()
-
-// Span(ctx, name, fn) — superfície RECOMENDADA para libs instrumentarem
-// operações concretas (DB, Kafka, HTTP) dentro de um trace já existente:
-// cria um span FILHO do ctx do caller, executa fn e marca erro no span.
-err := c.Span(parentCtx, "db.query", func(ctx context.Context) error {
-	// trace.SpanFromContext(ctx) está disponível p/ atributos extras
-	return doQuery(ctx)
+logger.Info("started")
+metric.Counter("requests", 1)
+trace.Span("operation", func(ctx context.Context) error {
+	return process(ctx)
 })
-
-// Logs (níveis padrão slog, sem ctx — correlação via contexto-base)
-c.Log().Error("boom", "err", err)
-c.Log().Info("started")
 ```
-
-`*Telemetry` já satisfaz `telemetry.Client` (non-breaking). Quando metrics/logging/
-tracing estão desligados, os acessores retornam implementações noop (nunca `nil`).
-
----
-
-## Profiling
-
-Um modo, pull-based:
-
-1. **Pull → pprof** (sob demanda): monte os handlers no mux:
-   ```go
-   tel.ProfilesRegister(mux) // /debug/pprof/ (cpu, heap, goroutine, block, mutex, trace)
-   ```
-   ⚠️ **Segurança**: `/debug/pprof/*` expõe heap dumps, stack traces e profiles sem
-   autenticação. **NÃO** exponha publicamente — restringa por rede/IP ou autenticação.
 
 ---
 
@@ -634,9 +629,9 @@ Um modo, pull-based:
 
 | Sintoma | Causa provável | Solução |
 |---|---|---|
-| Nada aparece no Grafana, mas logs vão para stdout | **`.env` não carregado** → lib em modo no-op | O `New()` **deve** chamar `environments.LoadDotEnv()`. Confirme no startup: `telemetry em modo no-op: TELEMETRY_ENDPOINT vazio` |
+| Nada aparece no Grafana, mas logs vão para stdout | Endpoint OTLP vazio ou incorreto | Defina `HELLNET_TELEMETRY_ENDPOINT`/`OTEL_EXPORTER_OTLP_ENDPOINT` e valide `/v1/traces`, `/v1/metrics` e `/v1/logs`; a lib não carrega `.env` implicitamente |
 | `telemetry iniciado ... Alloy inacessível no startup` | Endpoint não responde (rede/VPN/port-forward) | Valide: `curl -v https://alloy.hellnet.com.br/v1/traces`; use port-forward ou HTTPRoute acessível |
-| Traces/Tempo OK, mas metrics não no Prometheus | Prometheus sem `--web.enable-remote-write-receiver` | Adicione a flag ao args do Prometheus |
+| Traces/Tempo OK, mas metrics não chegam ao collector | Endpoint OTLP ou pipeline de métricas incorreto | Valide o endpoint `/v1/metrics` e a configuração do collector |
 | `405` ao testar OTLP com curl GET | Normal — OTLP HTTP usa **POST** | Use `curl -X POST` |
 
 ---
@@ -645,22 +640,18 @@ Um modo, pull-based:
 
 | Function | Description |
 |---|---|
-| `telemetry.New()` | Setup all-in-one (sem parâmetros): lê `HELLNET_*` e usa `context.Background()` como baseCtx |
-| `telemetry.MustNew()` | Como `New`, mas entra em pânico em erro |
+| `telemetry.New(ctx)` | Setup all-in-one: lê `HELLNET_*` e `OTEL_*` |
+| `telemetry.MustNew(ctx)` | Como `New`, mas entra em pânico em erro |
 | `telemetry.Middleware(tel, handler)` | HTTP tracing + request metrics + logging (request-scoped) |
 | `tel.Live()` / `tel.Ready()` / `tel.Health()` | Health probes (`http.Handler`) |
 | `tel.HealthRegister(name, fn)` | Custom health check — ctx **fornecido pela lib** |
-| `tel.MetricsHandler()` | `http.Handler` Prometheus `/metrics` |
-| `tel.WithSpan(name, fn)` | Span (raiz = baseCtx) + erro automático + `exceptions_total` em panic |
-| `tel.Span(ctx, name, fn)` | Span FILHO do ctx do caller + erro automático — superfície para libs instrumentarem DB/Kafka/HTTP |
-| `tel.Trace().Start(ctx, name)` | Escape hatch avançado: span enraizado num ctx próprio |
-| `tel.Meter.Counter/Gauge/Histogram(name)` | Atalhos int64 de métrica |
-| `tel.Log().Info/Error(...)` | Logging estruturado sem ctx (stdout + OTLP) |
-| `tel.Worker(job, fn, extra...)` | Job/worker: span + `worker_*` metrics (ctx vem do baseCtx) |
+| `tel.Trace(ctx).Span(name, fn)` | Span de aplicação context-aware |
+| `tel.Metric(ctx).Counter/Gauge/Histogram(name, value)` | Atalhos context-aware |
+| `tel.Log(ctx).Trace/Debug/Info/Warn/Error/Critical(...)` | Logging estruturado (stdout + OTLP) |
+| `tel.WorkerContext(ctx, job, fn, extra...)` | Worker com contexto explícito |
 | `tel.HTTPClient(opts...)` | `*http.Client` outbound: trace W3C + retry/backoff + métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
-| `tel.Close()` | Flush OTLP + Prometheus |
-| `opts.RedactSensitive` / `opts.RedactKeys` | Mascara PII nos logs |
+| `tel.Close(ctx)` | Flush OTLP |
 
 ---
 
@@ -669,10 +660,16 @@ Um modo, pull-based:
 | Pillar | Library | Export |
 |---|---|---|
 | **Traces** | `go.opentelemetry.io/otel` + `otlptracehttp` | OTLP HTTP → Collector → Tempo |
-| **Metrics** | `go.opentelemetry.io/otel` + `otlpmetrichttp` (+ `exporters/prometheus`) | OTLP HTTP → Collector → Prometheus; e `/metrics` local |
-| **Logs** | `log/slog` + `otelslog` bridge | OTLP HTTP → Collector → Loki |
+| **Metrics** | `go.opentelemetry.io/otel` + `otlpmetrichttp` | OTLP HTTP → Collector |
+| **Logs** | `go.uber.org/zap` + OTLP bridge | OTLP HTTP → Collector → Loki |
 
 Todos os sinais usam **OTLP HTTP**. gRPC não é suportado na configuração atual.
+
+## Releases
+
+As versões publicadas devem usar tags semver (`vMAJOR.MINOR.PATCH`). Mudanças
+de API incompatíveis exigem incremento de major; correções compatíveis usam
+minor ou patch conforme o impacto.
 
 Go 1.27+.
 

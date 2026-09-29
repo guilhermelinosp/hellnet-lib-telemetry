@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"log/slog"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,7 +17,10 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
+	"go.uber.org/zap"
 )
 
 // loggingResponseWriter wraps http.ResponseWriter to capture status code and
@@ -127,10 +130,12 @@ func (t *Telemetry) Live() http.Handler {
 	})
 }
 
-// Ready returns a readiness handler (self + OTLP collector + custom checks).
+// Ready returns a readiness handler for the application itself and custom checks.
+// Exporter availability is reported by Health and never removes the service
+// from rotation.
 func (t *Telemetry) Ready() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		checks, allPass := t.runChecks(r.Context())
+		checks, allPass := t.runChecks(r.Context(), false)
 		code := http.StatusOK
 		status := "ready"
 		if !allPass {
@@ -144,7 +149,7 @@ func (t *Telemetry) Ready() http.Handler {
 // Health returns a combined health handler.
 func (t *Telemetry) Health() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		checks, allPass := t.runChecks(r.Context())
+		checks, allPass := t.runChecks(r.Context(), true)
 		status := "ok"
 		code := http.StatusOK
 		if !allPass {
@@ -161,7 +166,7 @@ var healthCheckDurationBoundaries = []float64{
 }
 
 // recordHealthCheck executa fn, mede a duração e registra as métricas análogas ao
-// prometheus-net.AspNetCore.HealthChecks:
+// health checks da aplicação:
 //   - healthcheck_status{name}      gauge 0/1 (pass=1, fail=0)
 //   - healthcheck_duration_seconds{name}  histograma da duração do check
 //
@@ -180,15 +185,15 @@ func (t *Telemetry) recordHealthCheck(ctx context.Context, name string, fn func(
 
 	// t.Meter pode ser nil quando o Telemetry é construído manualmente sem New
 	// (ex.: testes de health que só checam JSON). Nesse caso, pula as métricas.
-	if t.Meter != nil {
+	if t.meter != nil {
 		// healthcheck_status é um Int64ObservableGauge (callback) que lê este
-		// mapa no scrape/export — exportação confiável em OTLP e Prometheus.
+		// mapa no export — exportação confiável em OTLP.
 		if t.healthStatus != nil {
 			t.healthStatusMu.Lock()
 			t.healthStatus[name] = val
 			t.healthStatusMu.Unlock()
 		}
-		if h, herr := t.Meter.Float64Histogram("healthcheck_duration_seconds",
+		if h, herr := t.meter.Float64Histogram("healthcheck_duration_seconds",
 			metric.WithExplicitBucketBoundaries(healthCheckDurationBoundaries...),
 			metric.WithUnit("s"),
 			metric.WithDescription("Duração de cada health check"),
@@ -202,20 +207,20 @@ func (t *Telemetry) recordHealthCheck(ctx context.Context, name string, fn func(
 // registerHealthMetrics cria o Int64ObservableGauge healthcheck_status, que
 // expõe o status (1=pass, 0=fail) de cada check a partir do mapa healthStatus
 // no instante do scrape/export. Isso garante que a métrica apareça em OTLP e
-// /metrics — o exporter Prometheus (otelprom) não exporta Int64Gauge síncrono
+// Gauge síncrono exportado pelo SDK OTLP.
 // com atributo de forma consistente, ao contrário dos observables (ex.: process_*).
 func (t *Telemetry) registerHealthMetrics() {
-	if t.Meter == nil {
+	if t.meter == nil {
 		return
 	}
 	t.healthStatus = map[string]int64{}
-	g, err := t.Meter.Int64ObservableGauge("healthcheck_status",
+	g, err := t.meter.Int64ObservableGauge("healthcheck_status",
 		metric.WithDescription("Health check status (1=pass, 0=fail) por check"),
 	)
 	if err != nil {
 		return
 	}
-	_, _ = t.Meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+	_, _ = t.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		t.healthStatusMu.Lock()
 		defer t.healthStatusMu.Unlock()
 		for name, v := range t.healthStatus {
@@ -227,14 +232,14 @@ func (t *Telemetry) registerHealthMetrics() {
 
 // runChecks executa self + OTLP collector + health checks customizados registrados,
 // registrando também as métricas de health check (ver recordHealthCheck).
-func (t *Telemetry) runChecks(ctx context.Context) ([]CheckResult, bool) {
+func (t *Telemetry) runChecks(ctx context.Context, includeCollector bool) ([]CheckResult, bool) {
 	allPass := true
 	checks := make([]CheckResult, 0, 2+len(t.healthChecksSnapshot()))
 
 	selfStatus, _ := t.recordHealthCheck(ctx, "self", func(context.Context) error { return nil })
 	checks = append(checks, CheckResult{Name: "self", Status: selfStatus})
 
-	if t.otlpEndpoint != "" {
+	if includeCollector && t.otlpEndpoint != "" {
 		st, err := t.recordHealthCheck(ctx, "otlp-collector", func(c context.Context) error {
 			return checkOTLPReachable(c, t.otlpEndpoint)
 		})
@@ -243,7 +248,9 @@ func (t *Telemetry) runChecks(ctx context.Context) ([]CheckResult, bool) {
 		}
 		cr := CheckResult{Name: "otlp-collector", Status: st}
 		if err != nil {
-			cr.Error = err.Error()
+			if t.includeHealthCheckErrors {
+				cr.Error = err.Error()
+			}
 		}
 		checks = append(checks, cr)
 	}
@@ -255,18 +262,22 @@ func (t *Telemetry) runChecks(ctx context.Context) ([]CheckResult, bool) {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		st, err := t.recordHealthCheck(ctx, name, snapshot[name])
+		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		st, err := t.recordHealthCheck(checkCtx, name, snapshot[name])
+		cancel()
 		cr := CheckResult{Name: name, Status: st}
 		if err != nil {
 			allPass = false
-			cr.Error = err.Error()
+			if t.includeHealthCheckErrors {
+				cr.Error = err.Error()
+			}
 		}
 		checks = append(checks, cr)
 	}
 
-	// healthcheck_all_pass: gauge 0/1 do estado agregado (paridade ao total do prometheus-net).
-	if t.Meter != nil {
-		if g, gerr := t.Meter.Gauge("healthcheck_all_pass"); gerr == nil {
+	// healthcheck_all_pass: gauge 0/1 do estado agregado.
+	if t.meter != nil {
+		if g, gerr := t.meter.Int64Gauge("healthcheck_all_pass"); gerr == nil {
 			v := int64(1)
 			if !allPass {
 				v = 0
@@ -347,7 +358,7 @@ func writeHealth(w http.ResponseWriter, code int, status HealthStatus) {
 //
 // A extração de contexto de trace dos requests inbound (via otelhttp) permanece
 // request-scoped por design: é correlação server-side, não "app-passing" — o
-// contexto da aplicação (baseCtx de New) não participa deste fluxo. Os logs do
+// contexto da aplicação não participa deste fluxo. Os logs do
 // middleware usam o ctx enriquecido com o span do request para correlação
 // trace→log nos sinks (stdout + OTLP).
 func Middleware(tel *Telemetry, next http.Handler) http.Handler {
@@ -355,29 +366,32 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 	if tel.tp != nil {
 		opts = append(opts, otelhttp.WithTracerProvider(tel.tp))
 	}
+	// Custom http_* metrics are the library's canonical server metrics. Keep
+	// otelhttp tracing/propagation while disabling its duplicate meter output.
+	opts = append(opts, otelhttp.WithMeterProvider(noop.NewMeterProvider()))
 
 	// Instrumentações de request criados uma única vez.
-	reqCount, _ := tel.Meter.Counter("http_requests_total")
-	reqDuration, _ := tel.Meter.Float64Histogram("http_request_duration_seconds",
+	reqCount, _ := tel.meter.Int64Counter("http_requests_total")
+	reqDuration, _ := tel.meter.Float64Histogram("http_request_duration_seconds",
 		metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...),
 		metric.WithUnit("s"),
 		metric.WithDescription("Duração de requests HTTP em segundos"),
 	)
 	// UpDownCounter é o instrumento correto para concorrência (inflight).
-	reqInflight, _ := tel.Meter.Int64UpDownCounter("http_requests_inflight")
-	respSize, _ := tel.Meter.Float64Histogram("http_response_size_bytes",
+	reqInflight, _ := tel.meter.Int64UpDownCounter("http_requests_inflight")
+	respSize, _ := tel.meter.Float64Histogram("http_response_size_bytes",
 		metric.WithExplicitBucketBoundaries(httpResponseSizeBoundaries...),
 		metric.WithUnit("By"),
 		metric.WithDescription("Tamanho da resposta HTTP em bytes"),
 	)
 	// Tamanho do corpo da requisição (via ContentLength; não consome o body).
-	reqBodySize, _ := tel.Meter.Float64Histogram("http_requests_body_size_bytes",
+	reqBodySize, _ := tel.meter.Float64Histogram("http_requests_body_size_bytes",
 		metric.WithExplicitBucketBoundaries(requestBodySizeBoundaries...),
 		metric.WithUnit("By"),
 		metric.WithDescription("Tamanho do corpo da requisição HTTP em bytes"),
 	)
 	// Erros HTTP (status >= 400) — sinal de taxa de erro automática no server.
-	reqErrors, _ := tel.Meter.Counter("http_server_errors_total")
+	reqErrors, _ := tel.meter.Int64Counter("http_server_errors_total")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -409,13 +423,13 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 		dur := time.Since(start)
 
 		// Log de request correlacionado ao span do request (nil-safe:
-		// logIn usa slog.Default se Logger nil)
-		tel.logIn(enriched, slog.LevelInfo, "request completed",
-			slog.String("method", r.Method),
-			slog.String("path", r.URL.Path),
-			slog.String("host", r.Host),
-			slog.Int("status", status),
-			slog.Duration("duration", dur),
+		// logIn preserva campos de trace no logger Zap.
+		tel.logIn(enriched, zap.InfoLevel, "request completed",
+			zap.String("method", r.Method),
+			zap.String("path", requestPath(r)),
+			zap.String("host", r.Host),
+			zap.Int("status", status),
+			zap.Duration("duration", dur),
 		)
 
 		if reqCount != nil {
@@ -447,6 +461,18 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 	})
 }
 
+// requestPath prefers the router pattern to avoid high-cardinality IDs in
+// structured logs. It falls back to the raw path when no router set a pattern.
+func requestPath(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if r.Pattern != "" {
+		return r.Pattern
+	}
+	return r.URL.Path
+}
+
 // httpResponseSizeBoundaries (bytes) para o histograma de tamanho de resposta.
 var httpResponseSizeBoundaries = []float64{
 	100, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000, 5000000,
@@ -461,40 +487,41 @@ var requestBodySizeBoundaries = []float64{
 
 // latencyBucketBoundaries são buckets explícitos (segundos) ajustados para
 // latência de requests/jobs (de ms a minutos), garantindo precisão de
-// p99/p95 no Prometheus. Compartilhado entre Middleware e Worker.
+// p99/p95 no backend de métricas. Compartilhado entre Middleware e Worker.
 var latencyBucketBoundaries = []float64{
 	0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60,
 }
 
-// Worker executa fn como uma unidade de trabalho observada automaticamente.
+// WorkerContext executa fn como uma unidade de trabalho observada automaticamente.
 // É o equivalente "sem HTTP" do Middleware: qualquer worker, consumer de fila,
 // job agendado (cron) ou task em background ganha observabilidade sem escrever
 // boilerplate.
 //
-// A lib mantém um contexto-base (baseCtx, derivado de context.Background()):
-// o span do job deriva dele (raiz(baseCtx) → filhos) e o ctx derivado é
-// repassado a fn para continuação da linhagem por código otel-instrumentado
-// mais a fundo.
+// O contexto recebido pelo caller é o pai do span do job e o ctx derivado é
+// repassado a fn para continuação da linhagem por código otel-instrumentado.
 //
 // Para cada execução o Worker produz, transparente para o caller:
 //   - span de trace (nome = job), com status de erro quando fn falha;
 //   - contador   worker_jobs_total{job,status[,extra]}   — total de execuções;
 //   - histograma worker_job_duration_seconds{job,status} — habilita p99/p95/p50
-//     via histogram_quantile no Prometheus/Grafana;
+//     via consultas de histograma no backend de métricas;
 //   - gauge      worker_jobs_inflight{job[,extra]}       — concorrência ativa;
 //   - log estruturado de início/fim com duração e erro (Error em falha),
 //     correlacionado ao span do job.
 //
 // Em panic: exceptions_total é incrementada, span finalizado e o panic
-// re-propagado (paridade com WithSpan; métricas/log pós-execução não são
+// re-propagado (métricas/log pós-execução não são
 // emitidos). O erro de fn é repassado (não tratado), então o caller decide
 // retry/backoff. extra permite atributos adicionais (fila, partition, tenant).
-func (t *Telemetry) Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error {
-	jobsTotal, _ := t.Meter.Counter("worker_jobs_total")
-	jobDur, _ := t.Meter.Float64Histogram("worker_job_duration_seconds", metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...), metric.WithUnit("s"), metric.WithDescription("Duração de execução de jobs/workers em segundos"))
+func (t *Telemetry) WorkerContext(parent context.Context, job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error {
+	if parent == nil {
+		return errors.New("telemetry: worker context is required")
+	}
+	jobsTotal, _ := t.meter.Int64Counter("worker_jobs_total")
+	jobDur, _ := t.meter.Float64Histogram("worker_job_duration_seconds", metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...), metric.WithUnit("s"), metric.WithDescription("Duração de execução de jobs/workers em segundos"))
 	// UpDownCounter é o instrumento correto para concorrência (inflight):
 	// permite Add/Sub de delta, diferente de Gauge (Record de valor absoluto).
-	inflight, _ := t.Meter.Int64UpDownCounter("worker_jobs_inflight")
+	inflight, _ := t.meter.Int64UpDownCounter("worker_jobs_inflight")
 
 	baseAttrs := append([]attribute.KeyValue{attribute.String("job", job)}, extra...)
 	withStatus := func(status string) []attribute.KeyValue {
@@ -502,14 +529,28 @@ func (t *Telemetry) Worker(job string, fn func(ctx context.Context) error, extra
 	}
 
 	if inflight != nil {
-		inflight.Add(t.baseCtx, 1, metric.WithAttributes(baseAttrs...))
-		defer inflight.Add(t.baseCtx, -1, metric.WithAttributes(baseAttrs...))
+		inflight.Add(parent, 1, metric.WithAttributes(baseAttrs...))
+		defer inflight.Add(parent, -1, metric.WithAttributes(baseAttrs...))
 	}
 
 	start := time.Now()
-	spanCtx, err := t.runBaseSpan(job, func(ctx context.Context) error {
-		return fn(ctx)
-	})
+	spanCtx, span := t.rawTrace().Start(parent, job)
+	defer span.End()
+	defer func() {
+		if r := recover(); r != nil {
+			if c, metricErr := t.meter.Int64Counter("exceptions_total"); metricErr == nil {
+				c.Add(spanCtx, 1, metric.WithAttributes(attribute.String("span", job), attribute.String("kind", "panic")))
+			}
+			span.RecordError(fmt.Errorf("%v", r))
+			span.SetStatus(codes.Error, fmt.Sprintf("%v", r))
+			panic(r)
+		}
+	}()
+	err := fn(spanCtx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 	dur := time.Since(start)
 
 	status := "ok"
@@ -525,11 +566,11 @@ func (t *Telemetry) Worker(job string, fn func(ctx context.Context) error, extra
 	}
 
 	if err != nil {
-		t.logIn(spanCtx, slog.LevelError, "worker job failed", slog.String("job", job), slog.Duration("duration", dur), slog.String("error", err.Error()))
+		t.logIn(spanCtx, zap.ErrorLevel, "worker job failed", zap.String("job", job), zap.Duration("duration", dur), zap.String("error", err.Error()))
 		return err
 	}
 
-	t.logIn(spanCtx, slog.LevelInfo, "worker job completed", slog.String("job", job), slog.Duration("duration", dur))
+	t.logIn(spanCtx, zap.InfoLevel, "worker job completed", zap.String("job", job), zap.Duration("duration", dur))
 	return nil
 }
 
@@ -587,10 +628,10 @@ func readThreads() (int64, error) {
 // WatchDB regista automaticamente métricas do pool de conexões de db
 // (database/sql), particionadas por name (ex.: "main", "replica"). Usa um
 // callback assíncrono que lê db.Stats() a cada collect — sem goroutines
-// próprias, acompanhando o ciclo do OTLP/Prometheus. Paridade com as métricas
-// de SqlClient do prometheus-net (ao nível do pool).
+// próprias, acompanhando o ciclo do OTLP. Paridade com as métricas
+// de pool do SqlClient (ao nível do pool).
 func (t *Telemetry) WatchDB(db *sql.DB, name string) {
-	m := t.Meter
+	m := t.meter
 	openConns, _ := m.Int64ObservableGauge("db_sql_open_connections",
 		metric.WithDescription("Number of open connections in the pool"))
 	inUse, _ := m.Int64ObservableGauge("db_sql_in_use_connections",

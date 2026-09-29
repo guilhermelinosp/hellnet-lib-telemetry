@@ -1,66 +1,57 @@
 // Package telemetry provides opinionated OpenTelemetry observability for Go services.
 //
-// Usage (sem parâmetros — a lib lê tudo do ambiente: .env + HELLNET_*):
+// Usage (sem parâmetros — a lib lê tudo diretamente do ambiente):
 //
-//	tel, err := telemetry.New()
-//	defer tel.Close()
+//	ctx := context.Background()
+//	tel, err := telemetry.New(ctx)
+//	defer tel.Close(ctx)
 //
-//	// Tracing (no ctx in the API — spans derive from the base context)
-//	err := tel.WithSpan("operation", func(ctx context.Context) error {
+//	// Tracing (context-first)
+//	err := tel.Trace(ctx).Span("operation", func(ctx context.Context) error {
 //		span := trace.SpanFromContext(ctx) // continues this span
 //		return doWork(ctx)
 //	})
 //
 //	// Metrics
-//	counter, _ := tel.Meter.Counter("requests.total")
-//	counter.Add(context.Background(), 1)
+//	_ = tel.Metric(ctx).Counter("requests.total", 1)
 //
-//	// Logging (via slog → stdout + OTLP → Loki), correlated with the
+//	// Logging (via Zap → stdout + OTLP → Loki), correlated with the
 //	// base-context trace lineage internally
-//	tel.Log().Info("processing", "id", orderID)
+//	tel.Log(ctx).Info("processing", "id", orderID)
 //
-// Correlation consequence: application-level traces form a single lineage
-// rooted at the base context (WithSpan/Worker spawn children under it), and
-// nested WithSpan/Worker calls inside fn automatically become CHILDREN of the
-// active span. Request-scoped traces extracted by the HTTP Middleware remain
-// independent: they originate from inbound requests, which is correct
-// server-side behavior.
+// Context-first operations preserve the caller's distributed trace. The
+// Every operation receives the caller's context.
 package telemetry
 
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/url"
-	"os"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/guilhermelinosp/hellnet-lib-environments/environments"
+	"github.com/guilhermelinosp/hellnet-lib-telemetry/internal/env"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconvv "go.opentelemetry.io/otel/semconv/v1.30.0"
 	"go.opentelemetry.io/otel/trace"
-
-	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Telemetry wraps OpenTelemetry primitives (tracer, meter, logger)
 // pre-configured for the service.
 type Telemetry struct {
-	Tracer trace.Tracer
-	Meter  Meter
-	Logger *slog.Logger
-
-	// baseCtx é o contexto-raiz da aplicação, informado UMA vez em New/MustNew.
-	baseCtx context.Context
-
-	spanMu    sync.Mutex
-	spanStack []*spanEntry
+	tracer trace.Tracer
+	meter  metric.Meter
+	Logger *zap.SugaredLogger
 
 	serviceName  string
 	otlpEndpoint string
@@ -70,87 +61,35 @@ type Telemetry struct {
 
 	healthStatusMu sync.Mutex
 	healthStatus   map[string]int64
+	logMu          sync.Mutex
+	logErrors      metric.Int64Counter
 
 	lp *sdklog.LoggerProvider
 	tp *sdktrace.TracerProvider
 	mp *sdkmetric.MeterProvider
 
-	promRegistry *prometheus.Registry
+	shutdownOnce             sync.Once
+	shutdownErr              error
+	includeHealthCheckErrors bool
 }
 
 // Options configures the Telemetry instance.
 type Options struct {
-	ServiceName   string
-	OTLPEndpoint  string
-	Environment   string
-	LogLevel      slog.Level
-	ResourceAttrs []attribute.KeyValue
+	ServiceName              string
+	ServiceVersion           string
+	OTLPEndpoint             string
+	Environment              string
+	LogLevel                 zapcore.Level
+	ResourceAttrs            []attribute.KeyValue
+	OTLPHeaders              map[string]string
+	IncludeHealthCheckErrors bool
 }
 
-// Default returns the default telemetry options.
-func Default() Options {
-	return Options{LogLevel: slog.LevelInfo}
-}
+// Telemetry is the single application facade for logs, metrics, traces and lifecycle.
 
-func (o *Options) from(base Options) {
-	o.ServiceName = envString("HELLNET_SERVICE", base.ServiceName)
-	o.OTLPEndpoint = envString("TELEMETRY_ENDPOINT", base.OTLPEndpoint)
-	o.Environment = envString("HELLNET_ENVIRONMENT", base.Environment)
-	o.LogLevel = base.LogLevel
-	o.ResourceAttrs = base.ResourceAttrs
-}
-
-func envString(name, fallback string) string {
-	if value := os.Getenv(name); value != "" {
-		return value
-	}
-	return fallback
-}
-
-// Client é a abstração composta dos 3 sinais + lifecycle.
-// Use para injeção de dependência e testes:
-//
-//	var c telemetry.Client = tel
-//	c.Meter.Counter("req_total")        // int64 (atalho)
-//	c.Meter.Float64Histogram("lat_s")   // float (superfície crua)
-//	c.WithSpan("op", func(ctx context.Context) error { ... })
-//	c.Error("boom", "err", err)         // log direto
-//	c.Warn("slow", "latency", dur)      // log direto
-//	c.Info("started", "port", port)     // log direto
-//	c.Debug("debug", "detail", val)     // log direto
-type Client interface {
-	Log() Logger
-	Trace() Tracer
-	Metric() Meter
-	Close() error
-	WithSpan(name string, fn func(ctx context.Context) error) error
-	Worker(job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error
-	// Span cria um span FILHO do ctx fornecido, executa fn e finaliza. Em erro,
-	// marca o span como erro (RecordError + SetStatus). É a superfície ideal
-	// para libs instrumentarem operações concretas (DB, Kafka, HTTP) dentro de
-	// um trace já existente: recebe o ctx do caller e o repassa para fn.
-	Span(ctx context.Context, name string, fn func(ctx context.Context) error) error
-	// Direct logging convenience methods (delegam para Log().*())
-	Error(msg string, args ...any)
-	Warn(msg string, args ...any)
-	Info(msg string, args ...any)
-	Debug(msg string, args ...any)
-
-	// Counter incrementa um contador int64 (atalho: cria/obtém + Add em uma chamada).
-	Counter(ctx context.Context, name string, value int64) error
-
-	// Gauge grava um valor em um gauge int64 (atalho: cria/obtém + Record em uma chamada).
-	Gauge(ctx context.Context, name string, value int64) error
-
-	// Histogram grava um valor em um histograma int64 (atalho: cria/obtém + Record em uma chamada).
-	Histogram(ctx context.Context, name string, value int64) error
-
-	// Duration grava uma duração em segundos em um histograma float64 (atalho: cria/obtém + Record em uma chamada).
-	Duration(ctx context.Context, name string, value float64) error
-}
-
-// Compile-time: *Telemetry satisfaz Client.
-var _ Client = (*Telemetry)(nil)
+// Telemetry is the single application facade for logs, metrics, traces and
+// lifecycle. Context-aware methods are the public API; implementation details
+// remain private to this package.
 
 // otlpSignalURL retorna a URL completa de um sinal OTLP (traces/metrics/logs)
 // anexando o path do signal quando o ENDPOINT base não traz path. Versões
@@ -175,30 +114,58 @@ func otlpSignalURL(base, signalPath string) string {
 //
 // # Sem parâmetros — leitura de ambiente
 //
-// A lib carrega tudo do ambiente: carrega o .env (dev) + lê as envs
-// HELLNET_SERVICE / HELLNET_ENVIRONMENT são as únicas envs canônicas globais;
-// TELEMETRY_* contém as configurações específicas de observabilidade.
-// (env-first), sem receber ctx
-// nem Options. Usa context.Background() como contexto-base (baseCtx).
+// A lib lê diretamente as envs HELLNET_TELEMETRY_*, HELLNET_* e OTEL_*, sem
+// carregar arquivos .env ou depender de uma biblioteca externa de ambiente.
 //
-// Requer HELLNET_SERVICE e TELEMETRY_ENDPOINT definidos para exportação.
-func New() (*Telemetry, error) {
-	ctx := context.Background()
+// Requer HELLNET_TELEMETRY_SERVICE (ou HELLNET_SERVICE) e
+// HELLNET_TELEMETRY_ENDPOINT (ou HELLNET_ENDPOINT) definidos.
+func New(ctx context.Context) (*Telemetry, error) {
+	prefixes := []string{"HELLNET_TELEMETRY_", "HELLNET_"}
+	o := Options{
+		ServiceName:    env.Prefixed(prefixes, "SERVICE", env.String("OTEL_SERVICE_NAME", "telemetry")),
+		ServiceVersion: env.Prefixed(prefixes, "SERVICE_VERSION", env.String("OTEL_SERVICE_VERSION", "")),
+		OTLPEndpoint:   env.Prefixed(prefixes, "ENDPOINT", env.String("OTEL_EXPORTER_OTLP_ENDPOINT", "")),
+		Environment:    env.Prefixed(prefixes, "ENVIRONMENT", env.String("OTEL_DEPLOYMENT_ENVIRONMENT", "")),
+		OTLPHeaders:    parseOTLPHeaders(env.Prefixed(prefixes, "HEADERS", env.String("OTEL_EXPORTER_OTLP_HEADERS", ""))),
+		LogLevel:       zapcore.InfoLevel,
+	}
+	return NewWithOptions(ctx, o)
+}
 
-	// Env-first: carrega o .env (dev) antes de ler as envs. O GetString apenas
-	// lê os.Getenv; sem LoadDotEnv o .env do working dir nunca é carregado e a
-	// lib roda em modo no-op (nada é exportado). Best-effort: sem .env ou com
-	// erro de parse, cai para as env vars reais do processo.
-	_ = environments.LoadDotEnv()
+func parseOTLPHeaders(raw string) map[string]string {
+	result := make(map[string]string)
+	for _, pair := range strings.Split(raw, ",") {
+		key, value, ok := strings.Cut(pair, "=")
+		if ok && strings.TrimSpace(key) != "" {
+			result[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+	}
+	return result
+}
 
-	o := Default()
-	o.from(o)
+// NewWithOptions creates telemetry with an explicit context and options.
+func NewWithOptions(ctx context.Context, o Options) (*Telemetry, error) {
+	if ctx == nil {
+		return nil, errors.New("telemetry: context is required")
+	}
+	if o.LogLevel == 0 {
+		o.LogLevel = zapcore.InfoLevel
+	}
+	if o.ServiceName == "" {
+		return nil, errors.New("telemetry: service name is required")
+	}
 
-	// Build resource with service info
+	version := o.ServiceVersion
+	if version == "" {
+		version = "unknown"
+	}
+
 	resourceAttrs := []attribute.KeyValue{
 		semconvv.ServiceNameKey.String(o.ServiceName),
-		semconvv.ServiceVersionKey.String("1.0.0"),
-		attribute.String("deployment.environment", o.Environment),
+		semconvv.ServiceVersionKey.String(version),
+	}
+	if o.Environment != "" {
+		resourceAttrs = append(resourceAttrs, semconvv.DeploymentEnvironmentNameKey.String(o.Environment))
 	}
 
 	resourceAttrs = append(resourceAttrs, o.ResourceAttrs...)
@@ -209,39 +176,39 @@ func New() (*Telemetry, error) {
 	}
 
 	tel := &Telemetry{
-		baseCtx:      ctx,
-		serviceName:  o.ServiceName,
-		otlpEndpoint: o.OTLPEndpoint,
-		environment:  o.Environment,
+		serviceName:              o.ServiceName,
+		otlpEndpoint:             o.OTLPEndpoint,
+		environment:              o.Environment,
+		includeHealthCheckErrors: o.IncludeHealthCheckErrors,
 	}
 
 	// ── Logging / Tracing / Metrics ───────────────────────────────────
-	if err := tel.buildLogger(o, res); err != nil {
+	if err := tel.buildLogger(ctx, o, res); err != nil {
 		return nil, err
 	}
-	if err := tel.buildTracer(o, res); err != nil {
+	if err := tel.buildTracer(ctx, o, res); err != nil {
 		return nil, err
 	}
-	if err := tel.buildMeter(o, res); err != nil {
+	if err := tel.buildMeter(ctx, o, res); err != nil {
 		return nil, err
 	}
 
-	// Abstração de metrics (tel.Meter) — nunca nil (noop se metrics desligado).
-	if tel.Meter == nil {
-		tel.Meter = meterAdapter{otel.GetMeterProvider().Meter("noop")}
+	// Meter nunca fica nil (noop se metrics desligado).
+	if tel.meter == nil {
+		tel.meter = otel.GetMeterProvider().Meter("noop")
 	}
 
 	// Diagnóstico de startup: confirma o endpoint efetivamente lido e a
 	// conectividade com o Alloy. Evita o cenário de "modo no-op silencioso"
 	// (nada é exportado sem o usuário saber) que já causou confusão.
 	if o.OTLPEndpoint == "" {
-		tel.Logger.Warn("telemetry em modo no-op: TELEMETRY_ENDPOINT vazio, nada será exportado")
+		tel.Log(ctx).Warn("telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio, nada será exportado")
 	} else {
-		tel.Logger.Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "env", o.Environment)
+		tel.Log(ctx).Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "env", o.Environment)
 		// Conectividade do Alloy já é coberta pelo check "otlp-collector"
 		// embutido em runChecks (ver instrumentation.go) — não registrar duplicado.
 		if err := checkOTLPReachable(ctx, o.OTLPEndpoint); err != nil {
-			tel.Logger.Warn("telemetry: Alloy inacessível no startup (dados podem não chegar)",
+			tel.Log(ctx).Warn("telemetry: Alloy inacessível no startup (dados podem não chegar)",
 				"endpoint", o.OTLPEndpoint, "error", err)
 		}
 	}
@@ -250,8 +217,8 @@ func New() (*Telemetry, error) {
 }
 
 // MustNew is like New but panics on error. Use at startup.
-func MustNew() *Telemetry {
-	t, err := New()
+func MustNew(ctx context.Context) *Telemetry {
+	t, err := New(ctx)
 	if err != nil {
 		panic(err)
 	}
@@ -263,50 +230,53 @@ func MustNew() *Telemetry {
 // shut down IN PARALLEL — one slow/timing-out provider no longer consumes the
 // budget of the others. Errors are aggregated in stable order
 // (logs → traces → metrics). Call with defer when the service terminates.
-func (t *Telemetry) Close() error {
-	const shutdownTimeout = 5 * time.Second
+func (t *Telemetry) Close(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("telemetry: close context is required")
+	}
+	t.shutdownOnce.Do(func() {
+		const shutdownTimeout = 5 * time.Second
 
-	// shutters em ordem estável para a agregação de erros (logs → traces → metrics).
-	var shutters []func(context.Context) error
-	if t.lp != nil {
-		shutters = append(shutters, t.lp.Shutdown)
-	}
-	if t.tp != nil {
-		shutters = append(shutters, t.tp.Shutdown)
-	}
-	if t.mp != nil {
-		shutters = append(shutters, t.mp.Shutdown)
-	}
-
-	// Cada provider desliga em PARALELO com orçamento próprio de 5s; escreve
-	// no slot próprio e lê após Wait (happens-before via WaitGroup).
-	errs := make([]error, len(shutters))
-	var wg sync.WaitGroup
-	for i := range shutters {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-			defer cancel()
-			errs[i] = shutters[i](ctx)
-		}()
-	}
-	wg.Wait()
-
-	var agg []error
-	for _, err := range errs {
-		if err != nil {
-			agg = append(agg, err)
+		// shutters em ordem estável para a agregação de erros (logs → traces → metrics).
+		var shutters []func(context.Context) error
+		if t.lp != nil {
+			shutters = append(shutters, t.lp.Shutdown)
 		}
-	}
-	if len(agg) > 0 {
-		return errors.Join(agg...)
-	}
-	return nil
+		if t.tp != nil {
+			shutters = append(shutters, t.tp.Shutdown)
+		}
+		if t.mp != nil {
+			shutters = append(shutters, t.mp.Shutdown)
+		}
+		// Cada provider desliga em PARALELO com orçamento próprio de 5s; escreve
+		// no slot próprio e lê após Wait (happens-before via WaitGroup).
+		errs := make([]error, len(shutters))
+		var wg sync.WaitGroup
+		for i := range shutters {
+			wg.Go(func() {
+				shutdownCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
+				defer cancel()
+				errs[i] = shutters[i](shutdownCtx)
+			})
+		}
+		wg.Wait()
+
+		var agg []error
+		for _, err := range errs {
+			if err != nil {
+				agg = append(agg, err)
+			}
+		}
+		if len(agg) > 0 {
+			t.shutdownErr = errors.Join(agg...)
+		}
+	})
+	return t.shutdownErr
 }
 
 // HealthRegister registra um health check customizado (ex.: DB, redis, downstream).
-// Executado em /ready e /health; falha marca o serviço como degraded.
+// Executado em /ready e /health; falha marca o serviço como degraded. O
+// collector OTLP é verificado apenas por /health e não bloqueia readiness.
 //
 // O parâmetro check MANTÉM o signature func(ctx context.Context) error, mas o
 // ctx é FORNECIDO PELA LIB na execução (derivado do request da chamada HTTP de
@@ -318,46 +288,4 @@ func (t *Telemetry) HealthRegister(name string, check func(ctx context.Context) 
 		t.healthChecks = make(map[string]func(ctx context.Context) error)
 	}
 	t.healthChecks[name] = check
-}
-
-// Counter incrementa um contador int64 (atalho: cria/obtém + Add em uma chamada).
-func (t *Telemetry) Counter(ctx context.Context, name string, value int64) error {
-	c, err := t.Meter.Counter(name)
-	if err != nil {
-		return err
-	}
-	c.Add(ctx, value)
-	return nil
-}
-
-// Gauge grava um valor em um gauge int64 (atalho: cria/obtém + Record em uma chamada).
-// Nota: Int64Gauge do OTel é observável (callback), para set direto use Int64ObservableGauge via RegisterCallback.
-// Este atalho usa Record no Int64Gauge (compatível com OTel 1.27+).
-func (t *Telemetry) Gauge(ctx context.Context, name string, value int64) error {
-	g, err := t.Meter.Int64Gauge(name)
-	if err != nil {
-		return err
-	}
-	g.Record(ctx, value)
-	return nil
-}
-
-// Histogram grava um valor em um histograma int64 (atalho: cria/obtém + Record em uma chamada).
-func (t *Telemetry) Histogram(ctx context.Context, name string, value int64) error {
-	h, err := t.Meter.Int64Histogram(name)
-	if err != nil {
-		return err
-	}
-	h.Record(ctx, value)
-	return nil
-}
-
-// Duration grava uma duração em segundos em um histograma float64 (atalho: cria/obtém + Record em uma chamada).
-func (t *Telemetry) Duration(ctx context.Context, name string, value float64) error {
-	h, err := t.Meter.Float64Histogram(name)
-	if err != nil {
-		return err
-	}
-	h.Record(ctx, value)
-	return nil
 }

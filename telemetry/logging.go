@@ -2,14 +2,16 @@ package telemetry
 
 import (
 	"context"
-	"log/slog"
+	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
-	"sync"
+	"strings"
 	"time"
 
-	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
+	otelLog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
@@ -18,303 +20,281 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// Logger é a abstração de logs (níveis padrão slog, sem Trace).
-// Espelha a superfície básica do *slog.Logger para permitir DI/mock.
-//
-// Não recebe ctx: a correlação de trace usa o contexto-base (definido em New)
-// internamente nos sinks (contextTraceHandler/otelslog).
+const (
+	// TraceLevel is the lowest supported log level.
+	TraceLevel zapcore.Level = -2
+	// CriticalLevel is a critical level that does not terminate the process.
+	CriticalLevel zapcore.Level = 3
+)
+
+// Logger exposes all severities. Critical never exits the process.
 type Logger interface {
-	Debug(msg string, args ...any)
-	Info(msg string, args ...any)
-	Warn(msg string, args ...any)
-	Error(msg string, args ...any)
-	With(args ...any) Logger
+	Trace(string, ...any)
+	Debug(string, ...any)
+	Info(string, ...any)
+	Warn(string, ...any)
+	Error(string, ...any)
+	Critical(string, ...any)
+	With(...any) Logger
 }
 
-// contextTraceHandler enriquece registros slog com trace_id/span_id quando há
-// um span ativo no contexto, correlacionando logs com traces no stdout (o
-// otelslog já cobre o sink OTLP). WithAttrs/WithGroup reaplicam o wrapper
-// para handlers derivados manterem a injeção.
-type contextTraceHandler struct {
-	slog.Handler
+type zapLogger struct {
+	l       *zap.SugaredLogger
+	ctx     context.Context
+	onWrite func(context.Context, zapcore.Level)
 }
 
-// errorCountHandler conta automaticamente erros (nível >= Error) emitidos via
-// slog, expondo log_errors_total. O contador é criado preguiçosamente no
-// primeiro Handle, quando tel.Meter já está disponível (o bloco de logging é
-// construído antes do de métricas no New).
-//
-// IMPORTANTE: mu e cnt são PONTEIROS compartilhados entre o handler original e
-// seus derivados (WithAttrs/WithGroup) — handlers derivados incrementam o MESMO
-// contador visível no original, inclusive durante o lazy-init (a criação feita
-// pelo derivado é vista pelo original e vice-versa). Use newErrorCountHandler.
-type errorCountHandler struct {
-	slog.Handler
-	tel *Telemetry
-	mu  *sync.Mutex
-	cnt *metric.Int64Counter
+type redactingCore struct{ zapcore.Core }
+
+func (c redactingCore) With(fields []zap.Field) zapcore.Core {
+	return redactingCore{Core: c.Core.With(redactFields(fields))}
 }
 
-// slogLogger implementa Logger. Internamente usa o contexto-base
-// (retido em New) nas chamadas *Context do slog, mantendo a
-// correlação trace→log (stdout e OTLP) para a linhagem raiz→filhos.
-type slogLogger struct {
-	l   *slog.Logger
-	ctx context.Context
+func (c redactingCore) Write(entry zapcore.Entry, fields []zap.Field) error {
+	return c.Core.Write(entry, redactFields(fields))
 }
 
-func (h contextTraceHandler) Handle(ctx context.Context, r slog.Record) error {
-	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
-		r.AddAttrs(slog.String("trace_id", sc.TraceID().String()), slog.String("span_id", sc.SpanID().String()))
-	}
-	return h.Handler.Handle(ctx, r)
-}
-
-func (h contextTraceHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return contextTraceHandler{h.Handler.WithAttrs(attrs)}
-}
-
-func (h contextTraceHandler) WithGroup(name string) slog.Handler {
-	return contextTraceHandler{h.Handler.WithGroup(name)}
-}
-
-// newErrorCountHandler cria o handler com o estado compartilhado inicializado.
-func newErrorCountHandler(h slog.Handler, tel *Telemetry) *errorCountHandler {
-	return &errorCountHandler{
-		Handler: h,
-		tel:     tel,
-		mu:      &sync.Mutex{},
-		cnt:     new(metric.Int64Counter),
-	}
-}
-
-func (h *errorCountHandler) Handle(ctx context.Context, r slog.Record) error {
-	if r.Level >= slog.LevelError && h.tel != nil {
-		h.mu.Lock()
-		c := *h.cnt
-		if c == nil && h.tel.Meter != nil {
-			c, _ = h.tel.Meter.Counter("log_errors_total")
-			*h.cnt = c // escreve via ponteiro compartilhado: derivados + original veem
-		}
-		h.mu.Unlock()
-		if c != nil {
-			c.Add(ctx, 1, metric.WithAttributes(attribute.String("level", r.Level.String())))
+func redactFields(fields []zap.Field) []zap.Field {
+	redacted := make([]zap.Field, len(fields))
+	for i, field := range fields {
+		if isSensitiveKey(field.Key) {
+			redacted[i] = zap.String(field.Key, "[REDACTED]")
+		} else {
+			redacted[i] = field
 		}
 	}
-	return h.Handler.Handle(ctx, r)
+	return redacted
 }
 
-func (h *errorCountHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &errorCountHandler{h.Handler.WithAttrs(attrs), h.tel, h.mu, h.cnt}
-}
-
-func (h *errorCountHandler) WithGroup(name string) slog.Handler {
-	return &errorCountHandler{h.Handler.WithGroup(name), h.tel, h.mu, h.cnt}
-}
-
-func (s slogLogger) log(level slog.Level, msg string, args ...any) {
-	s.l.Log(s.ctx, level, msg, args...)
-}
-
-func (s slogLogger) Debug(msg string, a ...any) { s.log(slog.LevelDebug, msg, a...) }
-func (s slogLogger) Info(msg string, a ...any)  { s.log(slog.LevelInfo, msg, a...) }
-func (s slogLogger) Warn(msg string, a ...any)  { s.log(slog.LevelWarn, msg, a...) }
-func (s slogLogger) Error(msg string, a ...any) { s.log(slog.LevelError, msg, a...) }
-
-func (s slogLogger) With(a ...any) Logger { return slogLogger{l: s.l.With(a...), ctx: s.ctx} }
-
-// logIn registra um log correlacionado ao ctx informado (ex.: span de request
-// capturado pelo Middleware, ou span interno do Worker), preservando a
-// correlação trace→log nos sinks (contextTraceHandler no stdout e otelslog via
-// OTLP) sem expor ctx na abstração pública Logger. Nil-safe (slog.Default).
-func (t *Telemetry) logIn(ctx context.Context, level slog.Level, msg string, args ...any) {
-	l := t.Logger
-	if l == nil {
-		l = slog.Default()
-	}
-	switch level {
-	case slog.LevelDebug:
-		l.DebugContext(ctx, msg, args...)
-	case slog.LevelWarn:
-		l.WarnContext(ctx, msg, args...)
-	case slog.LevelError:
-		l.ErrorContext(ctx, msg, args...)
+func isSensitiveKey(key string) bool {
+	switch strings.ToLower(strings.ReplaceAll(key, "-", "_")) {
+	case "password", "passwd", "token", "secret", "authorization", "api_key", "access_token", "refresh_token", "cookie", "set_cookie", "session_id":
+		return true
 	default:
-		l.InfoContext(ctx, msg, args...)
+		return false
 	}
 }
 
-// buildLogger monta o Logger (stdout JSON via zap + OTLP → Loki) com redação e
-// enriquecimento de trace_id/span_id, registrando o erro-count handler.
-func (t *Telemetry) buildLogger(o Options, res *sdkresource.Resource) error {
-	lp, err := newLoggerProvider(o, res)
+func (l zapLogger) log(level zapcore.Level, msg string, args ...any) {
+	fields := append(contextFields(l.ctx), zapFields(args...)...)
+	l.l.Desugar().Check(level, msg).Write(fields...)
+}
+func (l zapLogger) logNamed(label, msg string, args ...any) {
+	fields := append(contextFields(l.ctx), zap.String("severity_text", label))
+	fields = append(fields, zapFields(args...)...)
+	level := CriticalLevel
+	core := l.l.Desugar().Core()
+	if core.Enabled(level) {
+		_ = core.Write(zapcore.Entry{Level: level, Time: time.Now(), Message: msg}, fields)
+		if l.onWrite != nil {
+			l.onWrite(l.ctx, level)
+		}
+	}
+}
+func (l zapLogger) Trace(m string, a ...any)    { l.log(TraceLevel, m, a...) }
+func (l zapLogger) Debug(m string, a ...any)    { l.log(zap.DebugLevel, m, a...) }
+func (l zapLogger) Info(m string, a ...any)     { l.log(zap.InfoLevel, m, a...) }
+func (l zapLogger) Warn(m string, a ...any)     { l.log(zap.WarnLevel, m, a...) }
+func (l zapLogger) Error(m string, a ...any)    { l.log(zap.ErrorLevel, m, a...) }
+func (l zapLogger) Critical(m string, a ...any) { l.logNamed("CRITICAL", m, a...) }
+func (l zapLogger) With(a ...any) Logger {
+	return zapLogger{l: l.l.With(a...), ctx: l.ctx, onWrite: l.onWrite}
+}
+
+func zapFields(args ...any) []zap.Field {
+	fields := make([]zap.Field, 0, (len(args)+1)/2)
+	for i := 0; i < len(args); i += 2 {
+		key := "arg"
+		if s, ok := args[i].(string); ok {
+			key = s
+		}
+		var value any
+		if i+1 < len(args) {
+			value = args[i+1]
+		}
+		fields = append(fields, zap.Any(key, value))
+	}
+	return fields
+}
+
+func contextFields(ctx context.Context) []zap.Field {
+	if ctx == nil {
+		return nil
+	}
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return nil
+	}
+	return []zap.Field{zap.String("trace_id", sc.TraceID().String()), zap.String("span_id", sc.SpanID().String())}
+}
+
+// Log returns a context-aware structured logger.
+func (t *Telemetry) Log(ctx context.Context) Logger {
+	return zapLogger{l: t.Logger, ctx: ctx, onWrite: t.recordLogError}
+}
+func (t *Telemetry) logIn(ctx context.Context, level zapcore.Level, msg string, fields ...zap.Field) {
+	fields = append(contextFields(ctx), fields...)
+	t.Logger.Desugar().Check(level, msg).Write(fields...)
+}
+
+func (t *Telemetry) recordLogError(ctx context.Context, level zapcore.Level) {
+	t.logMu.Lock()
+	defer t.logMu.Unlock()
+	if t.meter == nil {
+		return
+	}
+	if t.logErrors == nil {
+		t.logErrors, _ = t.meter.Int64Counter("log_errors_total")
+	}
+	if t.logErrors != nil {
+		t.logErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("level", levelName(level))))
+	}
+}
+
+func levelName(level zapcore.Level) string {
+	switch level {
+	case TraceLevel:
+		return "TRACE"
+	case zap.DebugLevel:
+		return "DEBUG"
+	case zap.InfoLevel:
+		return "INFO"
+	case zap.WarnLevel:
+		return "WARN"
+	case zap.ErrorLevel:
+		return "ERROR"
+	case CriticalLevel:
+		return "CRITICAL"
+	default:
+		return level.String()
+	}
+}
+
+type otelZapCore struct {
+	logger otelLog.Logger
+	level  zapcore.LevelEnabler
+	fields []zap.Field
+	ctx    context.Context
+}
+
+func (c otelZapCore) Enabled(level zapcore.Level) bool { return c.level.Enabled(level) }
+func (c otelZapCore) With(fields []zap.Field) zapcore.Core {
+	return otelZapCore{logger: c.logger, level: c.level, fields: append(append([]zap.Field{}, c.fields...), fields...), ctx: c.ctx}
+}
+func (c otelZapCore) Check(e zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if c.Enabled(e.Level) {
+		return ce.AddCore(e, c)
+	}
+	return ce
+}
+func (c otelZapCore) Write(e zapcore.Entry, fields []zap.Field) error {
+	enc := zapcore.NewMapObjectEncoder()
+	for _, field := range append(append([]zap.Field{}, c.fields...), fields...) {
+		field.AddTo(enc)
+	}
+	record := otelLog.Record{}
+	record.SetTimestamp(e.Time)
+	record.SetSeverityText(levelName(e.Level))
+	record.SetSeverity(otelSeverity(e.Level))
+	record.SetBody(attribute.StringValue(Body(e, enc.Fields)))
+	attrs := make([]attribute.KeyValue, 0, len(enc.Fields))
+	for key, value := range enc.Fields {
+		attrs = append(attrs, zapAttribute(key, value))
+	}
+	record.AddAttributes(attrs...)
+	c.logger.Emit(c.ctx, record)
+	return nil
+}
+
+// Body encodes a log entry and fields as a JSON body compatible with Grafana/Loki.
+func Body(entry zapcore.Entry, fields map[string]any) string {
+	payload := make(map[string]any, len(fields)+3)
+	maps.Copy(payload, fields)
+	payload["time"] = entry.Time.UTC().Format(time.RFC3339Nano)
+	payload["level"] = levelName(entry.Level)
+	payload["msg"] = entry.Message
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return entry.Message
+	}
+	return string(encoded)
+}
+
+func zapAttribute(key string, value any) attribute.KeyValue {
+	switch v := value.(type) {
+	case string:
+		return attribute.String(key, v)
+	case bool:
+		return attribute.Bool(key, v)
+	case int:
+		return attribute.Int(key, v)
+	case int64:
+		return attribute.Int64(key, v)
+	case float64:
+		return attribute.Float64(key, v)
+	default:
+		return attribute.String(key, fmt.Sprint(v))
+	}
+}
+func (otelZapCore) Sync() error { return nil }
+
+func otelSeverity(level zapcore.Level) otelLog.Severity {
+	switch level {
+	case TraceLevel:
+		return otelLog.SeverityTrace
+	case zap.DebugLevel:
+		return otelLog.SeverityDebug
+	case zap.WarnLevel:
+		return otelLog.SeverityWarn
+	case zap.ErrorLevel:
+		return otelLog.SeverityError
+	case CriticalLevel:
+		return otelLog.SeverityFatal4
+	default:
+		return otelLog.SeverityInfo
+	}
+}
+
+func encodeZapLevel(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+	enc.AppendString(levelName(level))
+}
+
+func (t *Telemetry) buildLogger(ctx context.Context, o Options, res *sdkresource.Resource) error {
+	lp, err := newLoggerProvider(ctx, o, res)
 	if err != nil {
 		return err
 	}
 	t.lp = lp
-
-	// stdout JSON handler via zap (enriquecido com trace_id/span_id p/ correlação)
-	var stdoutHandler slog.Handler = newZapHandler(o.LogLevel)
-
-	stdoutHandler = contextTraceHandler{stdoutHandler}
-
-	// OTel bridge handler (sends via OTLP → Alloy → Loki)
-	var otelHandler slog.Handler = otelslog.NewHandler("otel", otelslog.WithLoggerProvider(lp))
-
-	// MultiHandler: writes to BOTH stdout AND OTLP; errorCountHandler
-	// conta erros logados automaticamente (log_errors_total).
-	t.Logger = slog.New(newErrorCountHandler(slog.NewMultiHandler(stdoutHandler, otelHandler), t))
-	slog.SetDefault(t.Logger)
+	stdout := zapcore.NewCore(zapcore.NewJSONEncoder(zapcore.EncoderConfig{
+		TimeKey: "time", LevelKey: "level", NameKey: "logger", CallerKey: "caller",
+		MessageKey: "msg", EncodeTime: zapcore.ISO8601TimeEncoder, EncodeLevel: encodeZapLevel,
+	}), zapcore.AddSync(os.Stdout), o.LogLevel)
+	otelCore := otelZapCore{logger: lp.Logger("zap"), level: o.LogLevel, ctx: ctx}
+	logger := zap.New(zapcore.NewTee(redactingCore{Core: stdout}, redactingCore{Core: otelCore}), zap.Hooks(func(entry zapcore.Entry) error {
+		if entry.Level >= zap.ErrorLevel {
+			t.recordLogError(ctx, entry.Level)
+		}
+		return nil
+	}))
+	t.Logger = logger.Sugar()
 	return nil
 }
 
-// zapHandler adapta um *zap.Logger como slog.Handler, mantendo a superfície
-// pública (Logger) inalterada e delegando a escrita do stdout ao zap (JSON,
-// timestamps e níveis nativos). A correlação trace→log continua sendo feita
-// pelo contextTraceHandler antes deste handler.
-type zapHandler struct {
-	log *zap.Logger
-}
-
-// newZapHandler cria o backend de stdout em JSON via zap, com nível mínimo
-// configurável.
-func newZapHandler(minLevel slog.Level) *zapHandler {
-	var level zapcore.Level
-	switch {
-	case minLevel <= slog.LevelDebug:
-		level = zapcore.DebugLevel
-	case minLevel <= slog.LevelInfo:
-		level = zapcore.InfoLevel
-	case minLevel <= slog.LevelWarn:
-		level = zapcore.WarnLevel
-	default:
-		level = zapcore.ErrorLevel
-	}
-	cfg := zap.NewProductionConfig()
-	cfg.Level = zap.NewAtomicLevelAt(level)
-	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	cfg.EncoderConfig.EncodeLevel = zapcore.LowercaseLevelEncoder
-	core := zapcore.NewCore(
-		zapcore.NewJSONEncoder(cfg.EncoderConfig),
-		zapcore.Lock(os.Stdout),
-		cfg.Level,
-	)
-	// Caller desligado: a cadeia de handlers (errorCount → multi →
-	// contextTrace → zap) tornaria o caller frágil/incorreto; o source real é
-	// enviado pelo otelslog via OTLP.
-	logger := zap.New(core)
-	return &zapHandler{log: logger}
-}
-
-// Enabled reports whether the record level is above the configured threshold.
-func (h *zapHandler) Enabled(_ context.Context, l slog.Level) bool {
-	return h.log.Core().Enabled(levelToZap(l))
-}
-
-// levelToZap maps a slog level to the nearest zapcore level.
-func levelToZap(l slog.Level) zapcore.Level {
-	switch {
-	case l >= slog.LevelError:
-		return zapcore.ErrorLevel
-	case l >= slog.LevelWarn:
-		return zapcore.WarnLevel
-	case l >= slog.LevelInfo:
-		return zapcore.InfoLevel
-	default:
-		return zapcore.DebugLevel
-	}
-}
-
-// Handle writes the slog record to zap.
-func (h *zapHandler) Handle(_ context.Context, r slog.Record) error {
-	fields := make([]zap.Field, 0, r.NumAttrs())
-	r.Attrs(func(a slog.Attr) bool {
-		fields = append(fields, slogAttrToZap(a))
-		return true
-	})
-	msg := r.Message
-	switch levelToZap(r.Level) {
-	case zapcore.DebugLevel:
-		h.log.Debug(msg, fields...)
-	case zapcore.WarnLevel:
-		h.log.Warn(msg, fields...)
-	case zapcore.ErrorLevel:
-		h.log.Error(msg, fields...)
-	default:
-		h.log.Info(msg, fields...)
-	}
-	return nil
-}
-
-// WithAttrs returns a handler with extra attrs attached (used by Logger.With).
-func (h *zapHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	fields := make([]zap.Field, 0, len(attrs))
-	for _, a := range attrs {
-		fields = append(fields, slogAttrToZap(a))
-	}
-	return &zapHandler{log: h.log.With(fields...)}
-}
-
-// WithGroup is a no-op for the zap backend (flat fields).
-func (h *zapHandler) WithGroup(string) slog.Handler { return h }
-
-// slogAttrToZap converts a single slog.Attr into a zap.Field.
-func slogAttrToZap(a slog.Attr) zap.Field {
-	key := a.Key
-	switch v := a.Value.Any().(type) {
-	case string:
-		return zap.String(key, v)
-	case int64:
-		return zap.Int64(key, v)
-	case uint64:
-		return zap.Uint64(key, v)
-	case float64:
-		return zap.Float64(key, v)
-	case bool:
-		return zap.Bool(key, v)
-	case time.Time:
-		return zap.Time(key, v)
-	case time.Duration:
-		return zap.Duration(key, v)
-	case error:
-		return zap.Error(v)
-	default:
-		return zap.Any(key, a.Value.Any())
-	}
-}
-
-// newLoggerProvider cria o LoggerProvider SDK. Endpoint vazio → sem export
-// OTLP (evita URL "https:" inválida no exporter).
-func newLoggerProvider(opts Options, res *sdkresource.Resource) (*sdklog.LoggerProvider, error) {
+func newLoggerProvider(ctx context.Context, opts Options, res *sdkresource.Resource) (*sdklog.LoggerProvider, error) {
 	logOpts := []sdklog.LoggerProviderOption{sdklog.WithResource(res)}
-
 	if opts.OTLPEndpoint != "" {
-		exporter, err := otlploghttp.New(
-			context.Background(),
+		exporterOpts := []otlploghttp.Option{
 			otlploghttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/logs")),
-			otlploghttp.WithTimeout(5*time.Second),
-		)
+			otlploghttp.WithTimeout(5 * time.Second),
+		}
+		if len(opts.OTLPHeaders) > 0 {
+			exporterOpts = append(exporterOpts, otlploghttp.WithHeaders(opts.OTLPHeaders))
+		}
+		exporter, err := otlploghttp.New(ctx, exporterOpts...)
 		if err != nil {
 			return nil, err
 		}
-		logOpts = append(logOpts, sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter, sdklog.WithExportInterval(1*time.Second), sdklog.WithExportMaxBatchSize(10))))
+		logOpts = append(logOpts, sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter, sdklog.WithExportInterval(time.Second), sdklog.WithExportMaxBatchSize(10))))
 	}
-
 	return sdklog.NewLoggerProvider(logOpts...), nil
 }
-
-// Log retorna a abstração de logs. Nome evita colisão com o campo exportado Logger.
-// O logger retornado deriva correlação do contexto-base internamente.
-func (t *Telemetry) Log() Logger { return slogLogger{l: t.Logger, ctx: t.baseCtx} }
-
-// Error loga no nível Error (delegam para Log().Error).
-func (t *Telemetry) Error(msg string, args ...any) { t.Log().Error(msg, args...) }
-
-// Warn loga no nível Warn (delegam para Log().Warn).
-func (t *Telemetry) Warn(msg string, args ...any) { t.Log().Warn(msg, args...) }
-
-// Info loga no nível Info (delegam para Log().Info).
-func (t *Telemetry) Info(msg string, args ...any) { t.Log().Info(msg, args...) }
-
-// Debug loga no nível Debug (delegam para Log().Debug).
-func (t *Telemetry) Debug(msg string, args ...any) { t.Log().Debug(msg, args...) }

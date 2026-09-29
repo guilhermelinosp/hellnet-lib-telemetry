@@ -3,33 +3,19 @@ package telemetry
 import (
 	"context"
 	"math"
-	"net/http"
 	"os"
 	"runtime"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
-	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 )
-
-// Meter expõe a superfície COMPLETA de metric.Meter (Float64*, Observable*,
-// RegisterCallback, etc.) + atalhos agnósticos int64: Counter/Gauge/Histogram.
-// Assim tel.Meter.Counter("x") evita Int64Counter, e tel.Meter.Float64Histogram(...)
-// /Int64ObservableGauge/RegisterCallback continuam disponíveis.
-type Meter interface {
-	metric.Meter
-	Counter(name string) (metric.Int64Counter, error)
-	Gauge(name string) (metric.Int64Gauge, error)
-	Histogram(name string) (metric.Int64Histogram, error)
-}
 
 // gcPauseBoundaries são buckets explícitos (segundos) para pausas de GC
 // (tipicamente µs a dezenas de ms), habilitando p99 da pausa de GC.
@@ -37,58 +23,60 @@ var gcPauseBoundaries = []float64{
 	1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1, 1,
 }
 
-// meterAdapter adapta metric.Meter para expor atalhos agnósticos int64.
-type meterAdapter struct{ metric.Meter }
-
-func (a meterAdapter) Counter(n string) (metric.Int64Counter, error) {
-	return a.Int64Counter(n)
+// ContextMeter records measurements using a caller-provided context.
+type ContextMeter struct {
+	tel *Telemetry
+	ctx context.Context
 }
 
-func (a meterAdapter) Gauge(n string) (metric.Int64Gauge, error) {
-	return a.Int64Gauge(n)
+// Counter adds an integer counter measurement.
+func (m ContextMeter) Counter(name string, value int64, attrs ...attribute.KeyValue) error {
+	c, err := m.tel.meter.Int64Counter(name)
+	if err != nil {
+		return err
+	}
+	c.Add(m.ctx, value, metric.WithAttributes(attrs...))
+	return nil
 }
 
-func (a meterAdapter) Histogram(n string) (metric.Int64Histogram, error) {
-	return a.Int64Histogram(n)
+// Gauge records an integer gauge measurement.
+func (m ContextMeter) Gauge(name string, value int64, attrs ...attribute.KeyValue) error {
+	g, err := m.tel.meter.Int64Gauge(name)
+	if err != nil {
+		return err
+	}
+	g.Record(m.ctx, value, metric.WithAttributes(attrs...))
+	return nil
 }
 
-// Metric retorna a abstração de metrics (tel.Meter). Nome evita colisão com o campo Meter.
-func (t *Telemetry) Metric() Meter { return t.Meter }
+// Histogram records a floating-point histogram measurement.
+func (m ContextMeter) Histogram(name string, value float64, attrs ...attribute.KeyValue) error {
+	h, err := m.tel.meter.Float64Histogram(name)
+	if err != nil {
+		return err
+	}
+	h.Record(m.ctx, value, metric.WithAttributes(attrs...))
+	return nil
+}
 
-// buildMeter monta o MeterProvider (OTLP + Prometheus), os runtime metrics e
-// as métricas de health check. Runtime metrics sempre ligadas (prometheus-net).
-func (t *Telemetry) buildMeter(o Options, res *sdkresource.Resource) error {
-	mp, promReg, err := newMeterProvider(o, res)
+// Metric returns a context-aware metric facade.
+func (t *Telemetry) Metric(ctx context.Context) ContextMeter {
+	return ContextMeter{tel: t, ctx: ctx}
+}
+
+// buildMeter monta o MeterProvider OTLP, as runtime metrics e as métricas de
+// health check. Não há endpoint local de exposição de métricas.
+func (t *Telemetry) buildMeter(ctx context.Context, o Options, res *sdkresource.Resource) error {
+	mp, err := newMeterProvider(ctx, o, res)
 	if err != nil {
 		return err
 	}
 	t.mp = mp
-	t.promRegistry = promReg
-	t.Meter = meterAdapter{mp.Meter(o.ServiceName)}
+	t.meter = mp.Meter(o.ServiceName)
 	otel.SetMeterProvider(mp)
 	t.startRuntimeMetrics()
 	t.registerHealthMetrics()
 	return nil
-}
-
-// MetricsHandler returns an http.Handler that serves the library's metrics in
-// Prometheus exposition format (text/plain), for scraping via a /metrics
-// endpoint. O exporter Prometheus vem sempre ligado por padrão. Permite
-// inspecionar as métricas (p99 de latência/worker, CPU, GC, health checks,
-// etc.) sem um collector OTLP — ideal durante testes locais.
-//
-// Exemplo:
-//
-//	mux.Handle("GET /metrics", tel.MetricsHandler())
-//
-// Nota: não pode chamar-se Metric() pois o acessor do meter (Client.Metric()
-// Meter) já ocupa esse nome no conjunto de métodos do Telemetry.
-func (t *Telemetry) MetricsHandler() http.Handler {
-	if t.promRegistry != nil {
-		return promhttp.HandlerFor(t.promRegistry, promhttp.HandlerOpts{})
-	}
-	// Fallback defensivo: /metrics vazio.
-	return promhttp.Handler()
 }
 
 // startRuntimeMetrics registra um conjunto abrangente de métricas de
@@ -101,7 +89,7 @@ func (t *Telemetry) MetricsHandler() http.Handler {
 // pausa individual (→ p99 da pausa de GC). CPU: uso do processo (% e razão).
 // Além de goroutines, num_cpu e uptime.
 func (t *Telemetry) startRuntimeMetrics() {
-	m := t.Meter
+	m := t.meter
 
 	goroutines, _ := m.Int64ObservableGauge("process_goroutines", metric.WithDescription("Number of goroutines"))
 	heapAlloc, _ := m.Int64ObservableGauge("process_heap_alloc_bytes", metric.WithDescription("Bytes of allocated heap objects"))
@@ -252,29 +240,22 @@ func readProcessCPUNs() (int64, error) {
 	return (utime + stime) * nsPerTick, nil
 }
 
-// newMeterProvider cria o MeterProvider SDK com OTLP + Prometheus.
-func newMeterProvider(opts Options, res *sdkresource.Resource) (*sdkmetric.MeterProvider, *prometheus.Registry, error) {
+// newMeterProvider cria o MeterProvider SDK com exportação exclusivamente OTLP.
+func newMeterProvider(ctx context.Context, opts Options, res *sdkresource.Resource) (*sdkmetric.MeterProvider, error) {
 	readerOpts := []sdkmetric.Option{sdkmetric.WithResource(res)}
 
-	// Endpoint vazio → sem reader OTLP; métricas exportadas só via Prometheus.
+	// Endpoint vazio → sem reader OTLP; métricas ficam apenas no SDK local.
 	if opts.OTLPEndpoint != "" {
-		exporter, err := otlpmetrichttp.New(
-			context.Background(), otlpmetrichttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/metrics")),
-		)
+		exporterOpts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpointURL(otlpSignalURL(opts.OTLPEndpoint, "/v1/metrics"))}
+		if len(opts.OTLPHeaders) > 0 {
+			exporterOpts = append(exporterOpts, otlpmetrichttp.WithHeaders(opts.OTLPHeaders))
+		}
+		exporter, err := otlpmetrichttp.New(ctx, exporterOpts...)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		readerOpts = append(readerOpts, sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)))
 	}
-
-	reg := prometheus.NewRegistry()
-	promExp, err := otelprom.New(otelprom.WithRegisterer(reg))
-	if err != nil {
-		return nil, nil, err
-	}
-	readerOpts = append(readerOpts, sdkmetric.WithReader(promExp))
-	promReg := reg
-
 	mp := sdkmetric.NewMeterProvider(readerOpts...)
-	return mp, promReg, nil
+	return mp, nil
 }
