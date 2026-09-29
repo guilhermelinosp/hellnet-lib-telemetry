@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -47,7 +48,7 @@ func (t *Telemetry) buildTracer(ctx context.Context, o Options, res *sdkresource
 // re-propagando o panic) e marca erro no span.
 func (t *Telemetry) runSpan(parent context.Context, name string, fn func(ctx context.Context) error) (context.Context, error) {
 	if parent == nil {
-		parent = t.baseCtx
+		return nil, errors.New("telemetry: context is required")
 	}
 	ctx, span := t.rawTrace().Start(parent, name)
 	defer func() {
@@ -77,11 +78,7 @@ func (t *Telemetry) runSpan(parent context.Context, name string, fn func(ctx con
 // Trace retorna a abstração de traces. Nome evita colisão com o campo exportado Tracer.
 //
 // Use o contexto recebido pelo caller para preservar a linhagem distribuída.
-func (t *Telemetry) Trace(contexts ...context.Context) ContextTracer {
-	ctx := t.baseCtx
-	if len(contexts) > 0 && contexts[0] != nil {
-		ctx = contexts[0]
-	}
+func (t *Telemetry) Trace(ctx context.Context) ContextTracer {
 	return ContextTracer{tel: t, ctx: ctx}
 }
 

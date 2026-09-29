@@ -358,7 +358,7 @@ func writeHealth(w http.ResponseWriter, code int, status HealthStatus) {
 //
 // A extração de contexto de trace dos requests inbound (via otelhttp) permanece
 // request-scoped por design: é correlação server-side, não "app-passing" — o
-// contexto da aplicação (baseCtx de New) não participa deste fluxo. Os logs do
+// contexto da aplicação não participa deste fluxo. Os logs do
 // middleware usam o ctx enriquecido com o span do request para correlação
 // trace→log nos sinks (stdout + OTLP).
 func Middleware(tel *Telemetry, next http.Handler) http.Handler {
@@ -497,10 +497,8 @@ var latencyBucketBoundaries = []float64{
 // job agendado (cron) ou task em background ganha observabilidade sem escrever
 // boilerplate.
 //
-// A lib mantém o contexto-base recebido pelo construtor para operações internas:
-// o span do job deriva dele (raiz(baseCtx) → filhos) e o ctx derivado é
-// repassado a fn para continuação da linhagem por código otel-instrumentado
-// mais a fundo.
+// O contexto recebido pelo caller é o pai do span do job e o ctx derivado é
+// repassado a fn para continuação da linhagem por código otel-instrumentado.
 //
 // Para cada execução o Worker produz, transparente para o caller:
 //   - span de trace (nome = job), com status de erro quando fn falha;
@@ -512,14 +510,14 @@ var latencyBucketBoundaries = []float64{
 //     correlacionado ao span do job.
 //
 // Em panic: exceptions_total é incrementada, span finalizado e o panic
-// re-propagado (paridade com WithSpan; métricas/log pós-execução não são
+// re-propagado (métricas/log pós-execução não são
 // emitidos). O erro de fn é repassado (não tratado), então o caller decide
 // retry/backoff. extra permite atributos adicionais (fila, partition, tenant).
 // WorkerContext preserves an existing request/consumer trace as the parent of
 // the worker span.
 func (t *Telemetry) WorkerContext(parent context.Context, job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error {
 	if parent == nil {
-		parent = t.baseCtx
+		return errors.New("telemetry: worker context is required")
 	}
 	jobsTotal, _ := t.meter.Int64Counter("worker_jobs_total")
 	jobDur, _ := t.meter.Float64Histogram("worker_job_duration_seconds", metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...), metric.WithUnit("s"), metric.WithDescription("Duração de execução de jobs/workers em segundos"))

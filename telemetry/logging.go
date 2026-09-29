@@ -132,11 +132,7 @@ func contextFields(ctx context.Context) []zap.Field {
 	return []zap.Field{zap.String("trace_id", sc.TraceID().String()), zap.String("span_id", sc.SpanID().String())}
 }
 
-func (t *Telemetry) Log(contexts ...context.Context) Logger {
-	ctx := t.baseCtx
-	if len(contexts) > 0 && contexts[0] != nil {
-		ctx = contexts[0]
-	}
+func (t *Telemetry) Log(ctx context.Context) Logger {
 	return zapLogger{l: t.Logger, ctx: ctx, onWrite: t.recordLogError}
 }
 func (t *Telemetry) logIn(ctx context.Context, level zapcore.Level, msg string, fields ...zap.Field) {
@@ -269,7 +265,7 @@ func (t *Telemetry) buildLogger(ctx context.Context, o Options, res *sdkresource
 	otelCore := otelZapCore{logger: lp.Logger("zap"), level: o.LogLevel, ctx: ctx}
 	logger := zap.New(zapcore.NewTee(redactingCore{Core: stdout}, redactingCore{Core: otelCore}), zap.Hooks(func(entry zapcore.Entry) error {
 		if entry.Level >= zap.ErrorLevel {
-			t.recordLogError(t.baseCtx, entry.Level)
+			t.recordLogError(ctx, entry.Level)
 		}
 		return nil
 	}))

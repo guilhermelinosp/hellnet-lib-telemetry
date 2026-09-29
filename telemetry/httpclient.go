@@ -32,7 +32,7 @@ import (
 //
 // O contexto usado nas tentativas deriva de req.Context() (linhagem que o
 // caller tiver — ex.: filho do span atual dentro de Trace(ctx).Span). NÃO há prazo
-// total derivado do baseCtx deliberadamente: quem chama controla o ciclo via
+// total derivado de um contexto interno deliberadamente: quem chama controla o ciclo via
 // ctx próprio da request.
 
 const (

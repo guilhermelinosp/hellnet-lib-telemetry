@@ -130,7 +130,7 @@ func (t *Telemetry) ProfilesStart(ctx context.Context, opts ...ProfileOption) (*
 	}
 	t.profiler = prof
 	if t.Logger != nil {
-		t.Log(t.baseCtx).Info("telemetry: profiling Pyroscope iniciado", "profileEndpoint", cfg.serverAddress)
+		t.Log(ctx).Info("telemetry: profiling Pyroscope iniciado", "profileEndpoint", cfg.serverAddress)
 	}
 	return prof, nil
 }

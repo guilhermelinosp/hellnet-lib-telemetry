@@ -39,11 +39,7 @@ func (m ContextMeter) Histogram(name string, value float64) error {
 	return m.tel.Duration(m.ctx, name, value)
 }
 
-func (t *Telemetry) Metric(contexts ...context.Context) ContextMeter {
-	ctx := t.baseCtx
-	if len(contexts) > 0 && contexts[0] != nil {
-		ctx = contexts[0]
-	}
+func (t *Telemetry) Metric(ctx context.Context) ContextMeter {
 	return ContextMeter{tel: t, ctx: ctx}
 }
 

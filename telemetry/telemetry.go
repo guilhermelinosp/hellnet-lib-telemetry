@@ -6,7 +6,7 @@
 //	tel, err := telemetry.New(ctx)
 //	defer tel.Close(ctx)
 //
-//	// Tracing (context-first; WithSpan remains a compatibility helper)
+//	// Tracing (context-first)
 //	err := tel.Trace(ctx).Span("operation", func(ctx context.Context) error {
 //		span := trace.SpanFromContext(ctx) // continues this span
 //		return doWork(ctx)
@@ -20,8 +20,7 @@
 //	tel.Log(ctx).Info("processing", "id", orderID)
 //
 // Context-first operations preserve the caller's distributed trace. The
-// context-free WithSpan/Worker helpers remain for background jobs with no
-// incoming context.
+// Every operation receives the caller's context.
 package telemetry
 
 import (
@@ -53,9 +52,6 @@ type Telemetry struct {
 	tracer trace.Tracer
 	meter  metric.Meter
 	Logger *zap.SugaredLogger
-
-	// baseCtx é o contexto-raiz da aplicação, informado UMA vez em New/MustNew.
-	baseCtx context.Context
 
 	serviceName  string
 	otlpEndpoint string
@@ -184,7 +180,6 @@ func NewWithOptions(ctx context.Context, o Options) (*Telemetry, error) {
 	}
 
 	tel := &Telemetry{
-		baseCtx:                  ctx,
 		serviceName:              o.ServiceName,
 		otlpEndpoint:             o.OTLPEndpoint,
 		environment:              o.Environment,

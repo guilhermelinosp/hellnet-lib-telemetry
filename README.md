@@ -211,7 +211,7 @@ err := tel.Trace(ctx).Span("process-order", func(ctx context.Context) error {
 // em erro: span marcado com status=Error + RecordError
 ```
 
-> `WithSpan` **recupera panics**: marca o span como erro, incrementa
+> `Trace(ctx).Span` **recupera panics**: marca o span como erro, incrementa
 > `exceptions_total{span,kind=panic}` e **re-propaga o panic** (comportamento
 > original preservado).
 
@@ -310,7 +310,7 @@ defer func(start time.Time) { hist.Record(ctx, time.Since(start).Milliseconds())
 
 - `log_errors_total{level}` — qualquer log Zap com nível ≥ Error.
 - `http_server_errors_total{method}` — respostas HTTP com status ≥ 400
-- `exceptions_total{span,kind}` — panics recuperados em `WithSpan`
+- `exceptions_total{span,kind}` — panics recuperados em `Trace(ctx).Span`
 
 **Runtime / processo (LIGADO POR PADRÃO quando metrics habilitado):**
 
@@ -388,19 +388,19 @@ No OpenTelemetry percentis **não são emitidos** — o que sai é um histograma
 Usa `go.uber.org/zap` com saída dupla: **stdout (JSON)** + **OTLP → Loki**.
 
 ```go
-tel.Log().Info("order created",
+tel.Log(ctx).Info("order created",
 	"order_id", "123", "customer_id", "456", "amount", 99.90)
 
-tel.Log().Warn("rate limit approaching", "current", 95, "limit", 100)
+tel.Log(ctx).Warn("rate limit approaching", "current", 95, "limit", 100)
 
-tel.Log().Error("payment failed", "order_id", "123", "error", err)
+tel.Log(ctx).Error("payment failed", "order_id", "123", "error", err)
 
 // Debug só aparece se LogLevel=Debug
-tel.Log().Debug("cache hit", "key", "user:123")
+tel.Log(ctx).Debug("cache hit", "key", "user:123")
 
-tel.Log().Trace("cache lookup detail", "key", "user:123")
-tel.Log().Fatal("worker cannot continue", "worker", "billing")
-tel.Log().Critical("data integrity failure", "table", "orders")
+tel.Log(ctx).Trace("cache lookup detail", "key", "user:123")
+tel.Log(ctx).Fatal("worker cannot continue", "worker", "billing")
+tel.Log(ctx).Critical("data integrity failure", "table", "orders")
 ```
 
 Níveis exportados: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL` e

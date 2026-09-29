@@ -191,7 +191,7 @@ func TestParseOTLPEndpoint(t *testing.T) {
 	}
 }
 
-func TestWithSpanAndLog(t *testing.T) {
+func TestTraceAndLog(t *testing.T) {
 	tel := newTestTel(t)
 	var inner bool
 	err := tel.Trace(context.Background()).Span("op", func(ctx context.Context) error {
@@ -207,14 +207,14 @@ func TestWithSpanAndLog(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("WithSpan erro: %v", err)
+		t.Fatalf("Trace erro: %v", err)
 	}
 	if !inner {
 		t.Fatal("fn não foi chamada")
 	}
 }
 
-func TestWithSpanContextPreservesParent(t *testing.T) {
+func TestTracePreservesParent(t *testing.T) {
 	tel := newTestTel(t)
 	parent := context.WithValue(context.Background(), struct{}{}, "parent")
 	if err := tel.Trace(parent).Span("context-op", func(ctx context.Context) error {
@@ -223,7 +223,7 @@ func TestWithSpanContextPreservesParent(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("WithSpanContext() erro: %v", err)
+		t.Fatalf("Trace() erro: %v", err)
 	}
 }
 
@@ -261,7 +261,7 @@ func TestReadyDoesNotDependOnCollector(t *testing.T) {
 	}
 }
 
-func TestWithSpanPanic(t *testing.T) {
+func TestTracePanic(t *testing.T) {
 	tel := newTestTel(t)
 	defer func() {
 		if r := recover(); r == nil {
@@ -400,11 +400,11 @@ func TestAlloyIntegration(t *testing.T) {
 	tel := MustNew(context.Background())
 	defer tel.Close(context.Background())
 
-	tel.Log().Info("integration test log", "ok", true)
+	tel.Log(context.Background()).Info("integration test log", "ok", true)
 	if err := tel.Trace(context.Background()).Span("integration-span", func(ctx context.Context) error {
 		return tel.Counter(ctx, "integration_test_total", 1)
 	}); err != nil {
-		t.Fatalf("WithSpan erro: %v", err)
+		t.Fatalf("Trace erro: %v", err)
 	}
 
 	// Tempo para os exporters batchearem e enviarem ao Alloy.
