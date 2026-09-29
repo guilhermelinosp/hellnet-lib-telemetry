@@ -358,7 +358,7 @@ func TestAlloyIntegration(t *testing.T) {
 
 	tel.Log(context.Background()).Info("integration test log", "ok", true)
 	if err := tel.Trace(context.Background()).Span("integration-span", func(ctx context.Context) error {
-		return tel.Counter(ctx, "integration_test_total", 1)
+		return tel.Metric(ctx).Counter("integration_test_total", 1)
 	}); err != nil {
 		t.Fatalf("Trace erro: %v", err)
 	}

@@ -29,15 +29,30 @@ type ContextMeter struct {
 }
 
 func (m ContextMeter) Counter(name string, value int64, attrs ...attribute.KeyValue) error {
-	return m.tel.Counter(m.ctx, name, value, attrs...)
+	c, err := m.tel.meter.Int64Counter(name)
+	if err != nil {
+		return err
+	}
+	c.Add(m.ctx, value, metric.WithAttributes(attrs...))
+	return nil
 }
 
 func (m ContextMeter) Gauge(name string, value int64, attrs ...attribute.KeyValue) error {
-	return m.tel.Gauge(m.ctx, name, value, attrs...)
+	g, err := m.tel.meter.Int64Gauge(name)
+	if err != nil {
+		return err
+	}
+	g.Record(m.ctx, value, metric.WithAttributes(attrs...))
+	return nil
 }
 
 func (m ContextMeter) Histogram(name string, value float64, attrs ...attribute.KeyValue) error {
-	return m.tel.Duration(m.ctx, name, value, attrs...)
+	h, err := m.tel.meter.Float64Histogram(name)
+	if err != nil {
+		return err
+	}
+	h.Record(m.ctx, value, metric.WithAttributes(attrs...))
+	return nil
 }
 
 func (t *Telemetry) Metric(ctx context.Context) ContextMeter {
