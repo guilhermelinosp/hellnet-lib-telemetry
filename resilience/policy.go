@@ -5,7 +5,10 @@ import (
 	"time"
 )
 
+// Func is an operation that can be wrapped by a resilience policy.
 type Func func(context.Context) error
+
+// Policy decorates an operation with resilience behavior.
 type Policy func(Func) Func
 
 // Chain composes policies. The first policy is the outermost one.

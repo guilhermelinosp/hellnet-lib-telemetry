@@ -492,7 +492,7 @@ var latencyBucketBoundaries = []float64{
 	0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60,
 }
 
-// Worker executa fn como uma unidade de trabalho observada automaticamente.
+// WorkerContext executa fn como uma unidade de trabalho observada automaticamente.
 // É o equivalente "sem HTTP" do Middleware: qualquer worker, consumer de fila,
 // job agendado (cron) ou task em background ganha observabilidade sem escrever
 // boilerplate.
@@ -513,8 +513,6 @@ var latencyBucketBoundaries = []float64{
 // re-propagado (métricas/log pós-execução não são
 // emitidos). O erro de fn é repassado (não tratado), então o caller decide
 // retry/backoff. extra permite atributos adicionais (fila, partition, tenant).
-// WorkerContext preserves an existing request/consumer trace as the parent of
-// the worker span.
 func (t *Telemetry) WorkerContext(parent context.Context, job string, fn func(ctx context.Context) error, extra ...attribute.KeyValue) error {
 	if parent == nil {
 		return errors.New("telemetry: worker context is required")

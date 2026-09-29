@@ -7,14 +7,19 @@ import (
 	"time"
 )
 
+// State identifies the current circuit breaker state.
 type State int
 
 const (
+	// Closed allows requests and counts failures.
 	Closed State = iota
+	// Open rejects requests until the open timeout elapses.
 	Open
+	// HalfOpen allows one probe request.
 	HalfOpen
 )
 
+// CircuitBreaker prevents repeated calls while a dependency is failing.
 type CircuitBreaker struct {
 	Threshold     int
 	OpenTimeout   time.Duration
@@ -28,6 +33,7 @@ type CircuitBreaker struct {
 	probing  bool
 }
 
+// Policy returns a policy backed by the circuit breaker.
 func (cb *CircuitBreaker) Policy() Policy {
 	return func(next Func) Func {
 		return func(ctx context.Context) error {
@@ -41,6 +47,7 @@ func (cb *CircuitBreaker) Policy() Policy {
 	}
 }
 
+// State returns the current circuit breaker state.
 func (cb *CircuitBreaker) State() State {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()

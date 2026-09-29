@@ -291,6 +291,7 @@ func retryDelay(base time.Duration, attempt int) time.Duration {
 	if d <= 0 {
 		return 0
 	}
+	// #nosec G404 -- retry jitter does not require cryptographic randomness.
 	return time.Duration(rand.Int64N(int64(d) + 1))
 }
 

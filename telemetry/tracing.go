@@ -19,11 +19,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// ContextTracer creates spans using a caller-provided context.
 type ContextTracer struct {
 	tel *Telemetry
 	ctx context.Context
 }
 
+// Span runs a function inside a child span.
 func (t ContextTracer) Span(name string, fn func(ctx context.Context) error) error {
 	_, err := t.tel.runSpan(t.ctx, name, fn)
 	return err

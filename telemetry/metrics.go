@@ -23,11 +23,13 @@ var gcPauseBoundaries = []float64{
 	1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1, 1,
 }
 
+// ContextMeter records measurements using a caller-provided context.
 type ContextMeter struct {
 	tel *Telemetry
 	ctx context.Context
 }
 
+// Counter adds an integer counter measurement.
 func (m ContextMeter) Counter(name string, value int64, attrs ...attribute.KeyValue) error {
 	c, err := m.tel.meter.Int64Counter(name)
 	if err != nil {
@@ -37,6 +39,7 @@ func (m ContextMeter) Counter(name string, value int64, attrs ...attribute.KeyVa
 	return nil
 }
 
+// Gauge records an integer gauge measurement.
 func (m ContextMeter) Gauge(name string, value int64, attrs ...attribute.KeyValue) error {
 	g, err := m.tel.meter.Int64Gauge(name)
 	if err != nil {
@@ -46,6 +49,7 @@ func (m ContextMeter) Gauge(name string, value int64, attrs ...attribute.KeyValu
 	return nil
 }
 
+// Histogram records a floating-point histogram measurement.
 func (m ContextMeter) Histogram(name string, value float64, attrs ...attribute.KeyValue) error {
 	h, err := m.tel.meter.Float64Histogram(name)
 	if err != nil {
@@ -55,6 +59,7 @@ func (m ContextMeter) Histogram(name string, value float64, attrs ...attribute.K
 	return nil
 }
 
+// Metric returns a context-aware metric facade.
 func (t *Telemetry) Metric(ctx context.Context) ContextMeter {
 	return ContextMeter{tel: t, ctx: ctx}
 }

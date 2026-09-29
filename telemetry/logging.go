@@ -21,9 +21,9 @@ import (
 )
 
 const (
+	// TraceLevel is the lowest supported log level.
 	TraceLevel zapcore.Level = -2
-	// Custom levels are written directly through the Zap core so they never
-	// trigger Zap's terminal or development-only behavior.
+	// CriticalLevel is a critical level that does not terminate the process.
 	CriticalLevel zapcore.Level = 3
 )
 
@@ -128,6 +128,7 @@ func contextFields(ctx context.Context) []zap.Field {
 	return []zap.Field{zap.String("trace_id", sc.TraceID().String()), zap.String("span_id", sc.SpanID().String())}
 }
 
+// Log returns a context-aware structured logger.
 func (t *Telemetry) Log(ctx context.Context) Logger {
 	return zapLogger{l: t.Logger, ctx: ctx, onWrite: t.recordLogError}
 }
@@ -205,9 +206,7 @@ func (c otelZapCore) Write(e zapcore.Entry, fields []zap.Field) error {
 	return nil
 }
 
-// otelLogBody keeps the OTLP body compatible with Grafana/Loki JSON views.
-// The same values remain available as OTLP attributes below, so consumers can
-// query either the JSON body or structured metadata without losing fields.
+// Body encodes a log entry and fields as a JSON body compatible with Grafana/Loki.
 func Body(entry zapcore.Entry, fields map[string]any) string {
 	payload := make(map[string]any, len(fields)+3)
 	maps.Copy(payload, fields)

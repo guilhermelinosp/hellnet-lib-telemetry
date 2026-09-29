@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+// RetryConfig configures retry attempts and backoff behavior.
 type RetryConfig struct {
 	MaxAttempts int
 	BaseDelay   time.Duration
@@ -16,6 +17,9 @@ type RetryConfig struct {
 	OnRetry     func(attempt int, err error)
 }
 
+// Retry retries an operation after transient failures.
+//
+//nolint:gocyclo // the retry state machine is intentionally explicit.
 func Retry(config RetryConfig) Policy {
 	return func(next Func) Func {
 		return func(ctx context.Context) error {
@@ -94,5 +98,6 @@ func retryDelay(base, max time.Duration, jitter float64, attempt int) time.Durat
 	if jitter == 0 {
 		return delay
 	}
+	// #nosec G404 -- jitter does not require cryptographic randomness.
 	return time.Duration(float64(delay) * (1 - jitter + rand.Float64()*2*jitter))
 }
