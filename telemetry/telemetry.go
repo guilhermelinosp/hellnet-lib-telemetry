@@ -68,10 +68,6 @@ type Telemetry struct {
 	tp *sdktrace.TracerProvider
 	mp *sdkmetric.MeterProvider
 
-	// profiler é o profiler Pyroscope (push), iniciado via ProfilesStart e
-	// parado em Close.
-	profiler pyroscopeProfiler
-
 	shutdownOnce             sync.Once
 	shutdownErr              error
 	includeHealthCheckErrors bool
@@ -208,21 +204,12 @@ func NewWithOptions(ctx context.Context, o Options) (*Telemetry, error) {
 	if o.OTLPEndpoint == "" {
 		tel.Log(ctx).Warn("telemetry em modo no-op: HELLNET_TELEMETRY_ENDPOINT vazio, nada será exportado")
 	} else {
-		tel.Log(ctx).Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "profiling", "auto", "env", o.Environment)
+		tel.Log(ctx).Info("telemetry iniciado", "service", o.ServiceName, "endpoint", o.OTLPEndpoint, "otlp", true, "env", o.Environment)
 		// Conectividade do Alloy já é coberta pelo check "otlp-collector"
 		// embutido em runChecks (ver instrumentation.go) — não registrar duplicado.
 		if err := checkOTLPReachable(ctx, o.OTLPEndpoint); err != nil {
 			tel.Log(ctx).Warn("telemetry: Alloy inacessível no startup (dados podem não chegar)",
 				"endpoint", o.OTLPEndpoint, "error", err)
-		}
-	}
-
-	// Profiling push (Pyroscope): inicia automaticamente quando há collector
-	// OTLP configurado. Se não houver endpoint, fica desligado silenciosamente
-	// (não falha o New — profiling é best-effort).
-	if o.OTLPEndpoint != "" {
-		if _, err := tel.ProfilesStart(ctx); err != nil {
-			tel.Log(ctx).Warn("telemetry: profiling não iniciado", "error", err)
 		}
 	}
 
@@ -261,10 +248,6 @@ func (t *Telemetry) Close(ctx context.Context) error {
 		if t.mp != nil {
 			shutters = append(shutters, t.mp.Shutdown)
 		}
-		if t.profiler != nil {
-			shutters = append(shutters, func(context.Context) error { return t.profiler.Stop() })
-		}
-
 		// Cada provider desliga em PARALELO com orçamento próprio de 5s; escreve
 		// no slot próprio e lê após Wait (happens-before via WaitGroup).
 		errs := make([]error, len(shutters))

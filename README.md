@@ -625,20 +625,6 @@ trace.Span("operation", func(ctx context.Context) error {
 
 ---
 
-## Profiling
-
-O profiling usa somente push para Pyroscope:
-
-1. **Push → Pyroscope** (contínuo): inicia sozinho no `New(ctx)` quando há
-   `HELLNET_TELEMETRY_ENDPOINT`. O endpoint é **derivado do mesmo endpoint OTLP**:
-   - In-cluster (`http://alloy:4318`) → `http://alloy:9999` (porta do `pyroscope.receive_http`)
-   - Gateway (`https://alloy.hellnet.com.br`) → `https://alloy.hellnet.com.br/ingest`
-   - Override: `HELLNET_TELEMETRY_PROFILE_ENDPOINT` (quando o Alloy não usa a porta 9999)
-   Habilita sempre CPU, heap (alloc/inuse), goroutines, **block** e **mutex**.
-   Para no `Close()`.
-
----
-
 ## Troubleshooting
 
 | Sintoma | Causa provável | Solução |
@@ -646,7 +632,6 @@ O profiling usa somente push para Pyroscope:
 | Nada aparece no Grafana, mas logs vão para stdout | Endpoint OTLP vazio ou incorreto | Defina `HELLNET_TELEMETRY_ENDPOINT`/`OTEL_EXPORTER_OTLP_ENDPOINT` e valide `/v1/traces`, `/v1/metrics` e `/v1/logs`; a lib não carrega `.env` implicitamente |
 | `telemetry iniciado ... Alloy inacessível no startup` | Endpoint não responde (rede/VPN/port-forward) | Valide: `curl -v https://alloy.hellnet.com.br/v1/traces`; use port-forward ou HTTPRoute acessível |
 | Traces/Tempo OK, mas metrics não chegam ao collector | Endpoint OTLP ou pipeline de métricas incorreto | Valide o endpoint `/v1/metrics` e a configuração do collector |
-| Profiles não no Pyroscope | Endpoint derivado errado (Alloy com porta ≠ 9999) | Sete `HELLNET_TELEMETRY_PROFILE_ENDPOINT` |
 | `405` ao testar OTLP com curl GET | Normal — OTLP HTTP usa **POST** | Use `curl -X POST` |
 
 ---

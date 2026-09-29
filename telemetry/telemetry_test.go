@@ -343,64 +343,6 @@ func TestHealthEndpoints(t *testing.T) {
 	}
 }
 
-func TestProfilesStartNoEndpoint(t *testing.T) {
-	tel := newTestTel(t)
-	// Sem endpoint configurado (newTestTel zera HELLNET_TELEMETRY_ENDPOINT),
-	// ProfilesStart deve retornar erro (não conecta).
-	prof, err := tel.ProfilesStart(context.Background())
-	if err == nil {
-		t.Fatal("esperado erro com HELLNET_TELEMETRY_ENDPOINT vazio")
-	}
-	if prof != nil {
-		t.Fatal("profiler não deve ser retornado em caso de erro")
-	}
-}
-
-func TestDeriveProfileEndpoint(t *testing.T) {
-	tests := []struct {
-		name string
-		base string
-		want string
-	}{
-		{name: "in-cluster", base: "http://alloy:4318", want: "http://alloy:9999"},
-		{name: "in-cluster root path", base: "http://alloy:4318/", want: "http://alloy:9999"},
-		{name: "gateway", base: "https://alloy.hellnet.com.br", want: "https://alloy.hellnet.com.br/ingest"},
-		{name: "gateway with v1", base: "https://alloy.hellnet.com.br/v1/", want: "https://alloy.hellnet.com.br/ingest"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := deriveProfileEndpoint(tt.base)
-			if err != nil {
-				t.Fatalf("erro inesperado: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("deriveProfileEndpoint(%q) = %q, want %q", tt.base, got, tt.want)
-			}
-		})
-	}
-	if _, err := deriveProfileEndpoint(""); err == nil {
-		t.Fatal("esperado erro com base vazia")
-	}
-}
-
-// TestProfilesStartIntegration valida o auto-start do push Pyroscope via New()
-// (derivando o endpoint do HELLNET_TELEMETRY_ENDPOINT). Pulado a menos que
-// ALLOY_ENDPOINT esteja definido (ex.: http://alloy:4318 ou https://alloy.hellnet.com.br).
-func TestProfilesStartIntegration(t *testing.T) {
-	endpoint := os.Getenv("ALLOY_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("defina ALLOY_ENDPOINT para rodar a integração real com o Pyroscope/Alloy")
-	}
-	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
-	tel := MustNew(context.Background()) // auto-inicia ProfilesStart() internamente
-	defer tel.Close(context.Background())
-	if tel.profiler == nil {
-		t.Fatal("profiler não iniciou automaticamente no New()")
-	}
-	// dá tempo do profiler registrar/enviar o primeiro snapshot
-	time.Sleep(2 * time.Second)
-}
-
 // TestAlloyIntegration valida o envio real de traces/metrics/logs para um
 // collector Alloy. É pulado a menos que ALLOY_ENDPOINT esteja definido
 // (ex.: http://alloy:4318 ou https://alloy.hellnet.com.br).
