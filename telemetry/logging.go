@@ -151,7 +151,7 @@ func (t *Telemetry) recordLogError(level zapcore.Level) {
 		return
 	}
 	if t.logErrors == nil {
-		t.logErrors, _ = t.meter.Counter("log_errors_total")
+		t.logErrors, _ = t.meter.Int64Counter("log_errors_total")
 	}
 	if t.logErrors != nil {
 		t.logErrors.Add(context.Background(), 1, metric.WithAttributes(attribute.String("level", levelName(level))))

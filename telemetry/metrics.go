@@ -16,36 +16,10 @@ import (
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 )
 
-// Meter expõe a superfície COMPLETA de metric.Meter (Float64*, Observable*,
-// RegisterCallback, etc.) + atalhos agnósticos int64: Counter/Gauge/Histogram.
-// Assim tel.Meter.Counter("x") evita Int64Counter, e tel.Meter.Float64Histogram(...)
-// /Int64ObservableGauge/RegisterCallback continuam disponíveis.
-type Meter interface {
-	metric.Meter
-	Counter(name string) (metric.Int64Counter, error)
-	Gauge(name string) (metric.Int64Gauge, error)
-	Histogram(name string) (metric.Int64Histogram, error)
-}
-
 // gcPauseBoundaries são buckets explícitos (segundos) para pausas de GC
 // (tipicamente µs a dezenas de ms), habilitando p99 da pausa de GC.
 var gcPauseBoundaries = []float64{
 	1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1, 1,
-}
-
-// meterAdapter adapta metric.Meter para expor atalhos agnósticos int64.
-type meterAdapter struct{ metric.Meter }
-
-func (a meterAdapter) Counter(n string) (metric.Int64Counter, error) {
-	return a.Int64Counter(n)
-}
-
-func (a meterAdapter) Gauge(n string) (metric.Int64Gauge, error) {
-	return a.Int64Gauge(n)
-}
-
-func (a meterAdapter) Histogram(n string) (metric.Int64Histogram, error) {
-	return a.Int64Histogram(n)
 }
 
 type ContextMeter struct {
@@ -81,7 +55,7 @@ func (t *Telemetry) buildMeter(o Options, res *sdkresource.Resource) error {
 		return err
 	}
 	t.mp = mp
-	t.meter = meterAdapter{mp.Meter(o.ServiceName)}
+	t.meter = mp.Meter(o.ServiceName)
 	otel.SetMeterProvider(mp)
 	t.startRuntimeMetrics()
 	t.registerHealthMetrics()

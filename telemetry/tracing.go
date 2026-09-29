@@ -18,11 +18,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Tracer abstrai a criação de spans (assinatura idêntica a trace.Tracer.Start).
-type Tracer interface {
-	Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span)
-}
-
 type ContextTracer struct {
 	tel *Telemetry
 	ctx context.Context
@@ -61,7 +56,7 @@ func (t *Telemetry) runSpan(parent context.Context, name string, fn func(ctx con
 		// comportamento original ao re-propagar o panic.
 		if r := recover(); r != nil {
 			if t.meter != nil {
-				if c, err := t.meter.Counter("exceptions_total"); err == nil {
+				if c, err := t.meter.Int64Counter("exceptions_total"); err == nil {
 					c.Add(ctx, 1, metric.WithAttributes(attribute.String("span", name), attribute.String("kind", "panic")))
 				}
 			}
@@ -90,7 +85,7 @@ func (t *Telemetry) Trace(contexts ...context.Context) ContextTracer {
 	return ContextTracer{tel: t, ctx: ctx}
 }
 
-func (t *Telemetry) rawTrace() Tracer {
+func (t *Telemetry) rawTrace() trace.Tracer {
 	if t.tracer == nil {
 		return otel.Tracer(t.serviceName)
 	}

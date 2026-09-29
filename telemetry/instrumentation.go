@@ -277,7 +277,7 @@ func (t *Telemetry) runChecks(ctx context.Context, includeCollector bool) ([]Che
 
 	// healthcheck_all_pass: gauge 0/1 do estado agregado.
 	if t.meter != nil {
-		if g, gerr := t.meter.Gauge("healthcheck_all_pass"); gerr == nil {
+		if g, gerr := t.meter.Int64Gauge("healthcheck_all_pass"); gerr == nil {
 			v := int64(1)
 			if !allPass {
 				v = 0
@@ -371,7 +371,7 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 	opts = append(opts, otelhttp.WithMeterProvider(noop.NewMeterProvider()))
 
 	// Instrumentações de request criados uma única vez.
-	reqCount, _ := tel.meter.Counter("http_requests_total")
+	reqCount, _ := tel.meter.Int64Counter("http_requests_total")
 	reqDuration, _ := tel.meter.Float64Histogram("http_request_duration_seconds",
 		metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...),
 		metric.WithUnit("s"),
@@ -391,7 +391,7 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 		metric.WithDescription("Tamanho do corpo da requisição HTTP em bytes"),
 	)
 	// Erros HTTP (status >= 400) — sinal de taxa de erro automática no server.
-	reqErrors, _ := tel.meter.Counter("http_server_errors_total")
+	reqErrors, _ := tel.meter.Int64Counter("http_server_errors_total")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -521,7 +521,7 @@ func (t *Telemetry) WorkerContext(parent context.Context, job string, fn func(ct
 	if parent == nil {
 		parent = t.baseCtx
 	}
-	jobsTotal, _ := t.meter.Counter("worker_jobs_total")
+	jobsTotal, _ := t.meter.Int64Counter("worker_jobs_total")
 	jobDur, _ := t.meter.Float64Histogram("worker_job_duration_seconds", metric.WithExplicitBucketBoundaries(latencyBucketBoundaries...), metric.WithUnit("s"), metric.WithDescription("Duração de execução de jobs/workers em segundos"))
 	// UpDownCounter é o instrumento correto para concorrência (inflight):
 	// permite Add/Sub de delta, diferente de Gauge (Record de valor absoluto).
@@ -542,7 +542,7 @@ func (t *Telemetry) WorkerContext(parent context.Context, job string, fn func(ct
 	defer span.End()
 	defer func() {
 		if r := recover(); r != nil {
-			if c, metricErr := t.meter.Counter("exceptions_total"); metricErr == nil {
+			if c, metricErr := t.meter.Int64Counter("exceptions_total"); metricErr == nil {
 				c.Add(spanCtx, 1, metric.WithAttributes(attribute.String("span", job), attribute.String("kind", "panic")))
 			}
 			span.RecordError(fmt.Errorf("%v", r))

@@ -6,29 +6,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-// Client is the compatibility surface consumed by the Hellnet integration libraries.
-type Client interface {
-	Log(...context.Context) Logger
-	Trace(...context.Context) ContextTracer
-	Metric(...context.Context) ContextMeter
-	Close() error
-	WithSpan(string, func(context.Context) error) error
-	WithSpanContext(context.Context, string, func(context.Context) error) error
-	Span(context.Context, string, func(context.Context) error) error
-	Worker(string, func(context.Context) error, ...attribute.KeyValue) error
-	WorkerContext(context.Context, string, func(context.Context) error, ...attribute.KeyValue) error
-	Error(string, ...any)
-	Warn(string, ...any)
-	Info(string, ...any)
-	Debug(string, ...any)
-	Counter(context.Context, string, int64) error
-	Gauge(context.Context, string, int64) error
-	Histogram(context.Context, string, int64) error
-	Duration(context.Context, string, float64) error
-}
-
-var _ Client = (*Telemetry)(nil)
-
 // Meter preserves the historical name for Metric.
 func (t *Telemetry) Meter(ctx ...context.Context) ContextMeter { return t.Metric(ctx...) }
 

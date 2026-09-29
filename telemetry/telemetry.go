@@ -47,7 +47,7 @@ import (
 // pre-configured for the service.
 type Telemetry struct {
 	tracer trace.Tracer
-	meter  Meter
+	meter  metric.Meter
 	Logger *zap.SugaredLogger
 
 	// baseCtx é o contexto-raiz da aplicação, informado UMA vez em New/MustNew.
@@ -193,9 +193,9 @@ func NewWithContext(ctx context.Context, o Options) (*Telemetry, error) {
 		return nil, err
 	}
 
-	// Abstração de metrics (tel.Meter) — nunca nil (noop se metrics desligado).
+	// Meter nunca fica nil, mesmo quando metrics está desligado.
 	if tel.meter == nil {
-		tel.meter = meterAdapter{otel.GetMeterProvider().Meter("noop")}
+		tel.meter = otel.GetMeterProvider().Meter("noop")
 	}
 
 	// Diagnóstico de startup: confirma o endpoint efetivamente lido e a
@@ -304,7 +304,7 @@ func (t *Telemetry) HealthRegister(name string, check func(ctx context.Context) 
 
 // Counter incrementa um contador int64 (atalho: cria/obtém + Add em uma chamada).
 func (t *Telemetry) Counter(ctx context.Context, name string, value int64) error {
-	c, err := t.meter.Counter(name)
+	c, err := t.meter.Int64Counter(name)
 	if err != nil {
 		return err
 	}

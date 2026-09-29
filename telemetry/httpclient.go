@@ -223,12 +223,12 @@ func cloneDefaultTransport() http.RoundTripper {
 
 // newClientMetrics cria as métricas do client no meter informado. Nil-safe
 // (Telemetry construído manualmente sem meter ⇒ métricas silenciadas).
-func newClientMetrics(m Meter) *clientMetrics {
+func newClientMetrics(m metric.Meter) *clientMetrics {
 	if m == nil {
 		return &clientMetrics{}
 	}
 	cm := &clientMetrics{}
-	cm.requestsTotal, _ = m.Counter("http_client_requests_total")
+	cm.requestsTotal, _ = m.Int64Counter("http_client_requests_total")
 	cm.requestDuration, _ = m.Float64Histogram(
 		"http_client_request_duration_seconds",
 		metric.WithDescription("Duração de requests HTTP de saída em segundos"),
