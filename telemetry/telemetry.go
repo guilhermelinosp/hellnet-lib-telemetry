@@ -253,13 +253,11 @@ func (t *Telemetry) Close(ctx context.Context) error {
 		errs := make([]error, len(shutters))
 		var wg sync.WaitGroup
 		for i := range shutters {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				shutdownCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
 				defer cancel()
 				errs[i] = shutters[i](shutdownCtx)
-			}()
+			})
 		}
 		wg.Wait()
 
