@@ -22,7 +22,7 @@ import (
 // ContextTracer creates spans using a caller-provided context.
 type ContextTracer struct {
 	tel *Telemetry
-	ctx context.Context
+	ctx context.Context //nolint:containedctx // TODO(fase-4): wrapper legado; a API nova recebe ctx por chamada.
 }
 
 // Span runs a function inside a child span.
