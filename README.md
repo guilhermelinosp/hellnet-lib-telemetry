@@ -399,14 +399,13 @@ tel.Log(ctx).Error("payment failed", "order_id", "123", "error", err)
 tel.Log(ctx).Debug("cache hit", "key", "user:123")
 
 tel.Log(ctx).Trace("cache lookup detail", "key", "user:123")
-tel.Log(ctx).Fatal("worker cannot continue", "worker", "billing")
 tel.Log(ctx).Critical("data integrity failure", "table", "orders")
 ```
 
-Níveis exportados: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL` e
-`CRITICAL`. `Trace` exige `LogLevel <= -8`; `Debug` exige `LogLevel <= Debug`.
-`Fatal` e `Critical` registram severidade alta, mas não encerram processo; o
-bootstrap da aplicação decide quando terminar.
+Níveis exportados: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` e `CRITICAL`.
+`Trace` exige `LogLevel <= -8`; `Debug` exige `LogLevel <= Debug`.
+`Critical` registra severidade alta, mas não encerra o processo; o bootstrap da
+aplicação decide quando terminar.
 
 Para preservar correlação em código request-scoped, use:
 
@@ -663,7 +662,7 @@ O profiling usa somente push para Pyroscope:
 | `tel.HealthRegister(name, fn)` | Custom health check — ctx **fornecido pela lib** |
 | `tel.Trace(ctx).Span(name, fn)` | Span de aplicação context-aware |
 | `tel.Metric(ctx).Counter/Gauge/Histogram(name, value)` | Atalhos context-aware |
-| `tel.Log(ctx).Trace/Debug/Info/Warn/Error/Fatal/Critical(...)` | Logging estruturado (stdout + OTLP) |
+| `tel.Log(ctx).Trace/Debug/Info/Warn/Error/Critical(...)` | Logging estruturado (stdout + OTLP) |
 | `tel.WorkerContext(ctx, job, fn, extra...)` | Worker com contexto explícito |
 | `tel.HTTPClient(opts...)` | `*http.Client` outbound: trace W3C + retry/backoff + métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |

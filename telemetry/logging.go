@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"time"
@@ -21,20 +22,18 @@ import (
 
 const (
 	TraceLevel zapcore.Level = -2
-	FatalLevel zapcore.Level = 5
 	// Custom levels are written directly through the Zap core so they never
 	// trigger Zap's terminal or development-only behavior.
 	CriticalLevel zapcore.Level = 3
 )
 
-// Logger exposes all severities. Fatal and Critical never exit the process.
+// Logger exposes all severities. Critical never exits the process.
 type Logger interface {
 	Trace(string, ...any)
 	Debug(string, ...any)
 	Info(string, ...any)
 	Warn(string, ...any)
 	Error(string, ...any)
-	Fatal(string, ...any)
 	Critical(string, ...any)
 	With(...any) Logger
 }
@@ -83,10 +82,7 @@ func (l zapLogger) log(level zapcore.Level, msg string, args ...any) {
 func (l zapLogger) logNamed(label, msg string, args ...any) {
 	fields := append(contextFields(l.ctx), zap.String("severity_text", label))
 	fields = append(fields, zapFields(args...)...)
-	level := FatalLevel
-	if label == "CRITICAL" {
-		level = CriticalLevel
-	}
+	level := CriticalLevel
 	core := l.l.Desugar().Core()
 	if core.Enabled(level) {
 		_ = core.Write(zapcore.Entry{Level: level, Time: time.Now(), Message: msg}, fields)
@@ -100,7 +96,6 @@ func (l zapLogger) Debug(m string, a ...any)    { l.log(zap.DebugLevel, m, a...)
 func (l zapLogger) Info(m string, a ...any)     { l.log(zap.InfoLevel, m, a...) }
 func (l zapLogger) Warn(m string, a ...any)     { l.log(zap.WarnLevel, m, a...) }
 func (l zapLogger) Error(m string, a ...any)    { l.log(zap.ErrorLevel, m, a...) }
-func (l zapLogger) Fatal(m string, a ...any)    { l.logNamed("FATAL", m, a...) }
 func (l zapLogger) Critical(m string, a ...any) { l.logNamed("CRITICAL", m, a...) }
 func (l zapLogger) With(a ...any) Logger {
 	return zapLogger{l: l.l.With(a...), ctx: l.ctx, onWrite: l.onWrite}
@@ -167,8 +162,6 @@ func levelName(level zapcore.Level) string {
 		return "WARN"
 	case zap.ErrorLevel:
 		return "ERROR"
-	case FatalLevel:
-		return "FATAL"
 	case CriticalLevel:
 		return "CRITICAL"
 	default:
@@ -202,7 +195,7 @@ func (c otelZapCore) Write(e zapcore.Entry, fields []zap.Field) error {
 	record.SetTimestamp(e.Time)
 	record.SetSeverityText(levelName(e.Level))
 	record.SetSeverity(otelSeverity(e.Level))
-	record.SetBody(attribute.StringValue(otelLogBody(e, enc.Fields)))
+	record.SetBody(attribute.StringValue(Body(e, enc.Fields)))
 	attrs := make([]attribute.KeyValue, 0, len(enc.Fields))
 	for key, value := range enc.Fields {
 		attrs = append(attrs, zapAttribute(key, value))
@@ -215,11 +208,9 @@ func (c otelZapCore) Write(e zapcore.Entry, fields []zap.Field) error {
 // otelLogBody keeps the OTLP body compatible with Grafana/Loki JSON views.
 // The same values remain available as OTLP attributes below, so consumers can
 // query either the JSON body or structured metadata without losing fields.
-func otelLogBody(entry zapcore.Entry, fields map[string]interface{}) string {
-	payload := make(map[string]interface{}, len(fields)+3)
-	for key, value := range fields {
-		payload[key] = value
-	}
+func Body(entry zapcore.Entry, fields map[string]any) string {
+	payload := make(map[string]any, len(fields)+3)
+	maps.Copy(payload, fields)
 	payload["time"] = entry.Time.UTC().Format(time.RFC3339Nano)
 	payload["level"] = levelName(entry.Level)
 	payload["msg"] = entry.Message
@@ -258,8 +249,6 @@ func otelSeverity(level zapcore.Level) otelLog.Severity {
 		return otelLog.SeverityWarn
 	case zap.ErrorLevel:
 		return otelLog.SeverityError
-	case FatalLevel:
-		return otelLog.SeverityFatal
 	case CriticalLevel:
 		return otelLog.SeverityFatal4
 	default:

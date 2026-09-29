@@ -15,7 +15,7 @@ import (
 
 func TestOTLPLogBodyIsJSON(t *testing.T) {
 	entry := zapcore.Entry{Level: zap.InfoLevel, Time: time.Date(2026, 9, 28, 22, 0, 0, 0, time.UTC), Message: "example log"}
-	body := otelLogBody(entry, map[string]interface{}{"key": "value", "count": int64(2)})
+	body := Body(entry, map[string]interface{}{"key": "value", "count": int64(2)})
 	var decoded map[string]interface{}
 	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
 		t.Fatalf("body is not JSON: %v", err)
@@ -217,7 +217,6 @@ func TestTraceAndLog(t *testing.T) {
 		logger.Info("info", "k", "v")
 		logger.Warn("warn", "k", "v")
 		logger.Error("error", "k", "v")
-		logger.Fatal("fatal", "k", "v")
 		logger.Critical("critical", "k", "v")
 		return nil
 	})
