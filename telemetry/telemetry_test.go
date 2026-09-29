@@ -2,13 +2,28 @@ package telemetry
 
 import (
 	"context"
-	"go.uber.org/zap"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
+
+func TestOTLPLogBodyIsJSON(t *testing.T) {
+	entry := zapcore.Entry{Level: zap.InfoLevel, Time: time.Date(2026, 9, 28, 22, 0, 0, 0, time.UTC), Message: "example log"}
+	body := otelLogBody(entry, map[string]interface{}{"key": "value", "count": int64(2)})
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if decoded["msg"] != "example log" || decoded["level"] != "INFO" || decoded["key"] != "value" {
+		t.Fatalf("unexpected body: %s", body)
+	}
+}
 
 // newTestTel constrói um Telemetry sem collector real (endpoint vazio) para os
 // testes unitários não tentarem conexões de rede.

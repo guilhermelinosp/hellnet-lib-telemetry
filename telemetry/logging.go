@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -201,7 +202,7 @@ func (c otelZapCore) Write(e zapcore.Entry, fields []zap.Field) error {
 	record.SetTimestamp(e.Time)
 	record.SetSeverityText(levelName(e.Level))
 	record.SetSeverity(otelSeverity(e.Level))
-	record.SetBody(attribute.StringValue(e.Message))
+	record.SetBody(attribute.StringValue(otelLogBody(e, enc.Fields)))
 	attrs := make([]attribute.KeyValue, 0, len(enc.Fields))
 	for key, value := range enc.Fields {
 		attrs = append(attrs, zapAttribute(key, value))
@@ -209,6 +210,24 @@ func (c otelZapCore) Write(e zapcore.Entry, fields []zap.Field) error {
 	record.AddAttributes(attrs...)
 	c.logger.Emit(c.ctx, record)
 	return nil
+}
+
+// otelLogBody keeps the OTLP body compatible with Grafana/Loki JSON views.
+// The same values remain available as OTLP attributes below, so consumers can
+// query either the JSON body or structured metadata without losing fields.
+func otelLogBody(entry zapcore.Entry, fields map[string]interface{}) string {
+	payload := make(map[string]interface{}, len(fields)+3)
+	for key, value := range fields {
+		payload[key] = value
+	}
+	payload["time"] = entry.Time.UTC().Format(time.RFC3339Nano)
+	payload["level"] = levelName(entry.Level)
+	payload["msg"] = entry.Message
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return entry.Message
+	}
+	return string(encoded)
 }
 
 func zapAttribute(key string, value any) attribute.KeyValue {

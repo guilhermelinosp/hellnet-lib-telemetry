@@ -423,6 +423,10 @@ tel.Log(ctx).Error("request failed", "error", err)
 {"time":"2026-01-15T10:30:00.123Z","level":"INFO","msg":"order created","order_id":"123","customer_id":"456","amount":99.9}
 ```
 
+O corpo de cada registro OTLP também é emitido como JSON, mantendo os mesmos
+campos como atributos OTLP. Isso permite que o Grafana/Loki detecte os campos
+na visualização JSON sem perder structured metadata.
+
 ### Segurança
 
 Não registre tokens, senhas ou PII nos argumentos de log. `/metrics` e
