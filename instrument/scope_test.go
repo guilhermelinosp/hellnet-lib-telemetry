@@ -65,3 +65,26 @@ func TestInstrumentsFallBackToNoopAndLog(t *testing.T) {
 func TestObserveAcceptsNilInstruments(t *testing.T) {
 	Observe(context.Background(), nil, nil, time.Now())
 }
+
+type nilableInstrumentation struct{ Instrumentation }
+
+func TestResolve(t *testing.T) {
+	if Resolve(nil) == nil {
+		t.Fatal("Resolve(nil) must return Noop")
+	}
+	var typedNil *nilableInstrumentation
+	got := Resolve(typedNil)
+	if got == Instrumentation(typedNil) {
+		t.Fatal("Resolve must replace a typed nil pointer with Noop")
+	}
+	if got.TracerProvider() == nil {
+		t.Fatal("Resolve(typed nil) must return a usable Noop")
+	}
+	real := &nilableInstrumentation{Instrumentation: Noop()}
+	if Resolve(real) != Instrumentation(real) {
+		t.Fatal("Resolve must return a non-nil instrumentation unchanged")
+	}
+	if s := NewScope(typedNil, "scope", "example.invalid/none"); s.Tracer == nil {
+		t.Fatal("NewScope must accept a typed nil")
+	}
+}
