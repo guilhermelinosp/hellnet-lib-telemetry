@@ -1,5 +1,3 @@
-// Deprecated: use a private test harness in each package instead.
-//
 // Package telemetrytest provides a small in-memory Instrumentation
 // implementation for library tests. It intentionally depends on the OTel SDK
 // and is not intended for production binaries.
