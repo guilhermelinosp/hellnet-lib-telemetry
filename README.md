@@ -20,8 +20,8 @@ lib, e a versão deve ser informada com `WithInstrumentationVersion` usando
 
 Obtenha tracer, meter e logger uma única vez no construtor e crie os
 instrumentos de métrica uma única vez. Se a instrumentação recebida for `nil`,
-substitua-a por `instrument.Noop()`. Nos testes, use
-`telemetrytest.New(t)` para spans, métricas e logs em memória.
+substitua-a por `instrument.Noop()`. Nos testes, use providers SDK de memória
+diretamente ou um harness privado da biblioteca de teste.
 
 ## Como um app conecta as libs
 

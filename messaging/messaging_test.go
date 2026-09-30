@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -36,8 +37,8 @@ func TestCarrierReadsForeignCaseAndDuplicateHeaders(t *testing.T) {
 		{Key: "traceparent", Value: []byte("preferred")},
 		{Key: "BAGGAGE", Value: []byte("k=v")},
 	})
-	if got := carrier.Get("TrAcEpArEnT"); got != "foreign" {
-		t.Fatalf("case-insensitive get = %q", got)
+	if got := carrier.Get("TrAcEpArEnT"); got != "preferred" {
+		t.Fatalf("lowercase precedence get = %q", got)
 	}
 	if got := carrier.Get("baggage"); got != "k=v" {
 		t.Fatalf("foreign baggage = %q", got)
@@ -55,11 +56,34 @@ func TestMessagingNamesAndAttributes(t *testing.T) {
 	if SendSpanName("orders") != "send orders" || ProcessSpanName("orders") != "process orders" {
 		t.Fatal("unexpected messaging span name")
 	}
-	attrs := []interface{}{
-		System("kafka"), DestinationName("orders"), OperationType("send"), OperationName("send orders"),
-		ConsumerGroupName("orders-worker"), DestinationPartitionID("2"), KafkaOffset(10), KafkaMessageKey("id"), ErrorType("timeout"),
+	attrs := []struct {
+		got  attribute.KeyValue
+		key  attribute.Key
+		want any
+	}{
+		{System("kafka"), "messaging.system", "kafka"},
+		{DestinationName("orders"), "messaging.destination.name", "orders"},
+		{OperationType("send"), "messaging.operation.type", "send"},
+		{OperationName("send orders"), "messaging.operation.name", "send orders"},
+		{ConsumerGroupName("orders-worker"), "messaging.consumer.group.name", "orders-worker"},
+		{DestinationPartitionID("2"), "messaging.destination.partition.id", "2"},
+		{KafkaOffset(10), "messaging.kafka.offset", int64(10)},
+		{KafkaMessageKey("id"), "messaging.kafka.message.key", "id"},
+		{ErrorType("timeout"), "error.type", "timeout"},
 	}
-	if len(attrs) != 9 {
-		t.Fatalf("attributes = %d", len(attrs))
+	for _, test := range attrs {
+		if test.got.Key != test.key {
+			t.Errorf("key = %q, want %q", test.got.Key, test.key)
+		}
+		switch want := test.want.(type) {
+		case string:
+			if got := test.got.Value.AsString(); got != want {
+				t.Errorf("%s = %q, want %q", test.key, got, want)
+			}
+		case int64:
+			if got := test.got.Value.AsInt64(); got != want {
+				t.Errorf("%s = %d, want %d", test.key, got, want)
+			}
+		}
 	}
 }

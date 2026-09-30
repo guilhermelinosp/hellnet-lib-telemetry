@@ -34,6 +34,34 @@ jobs:
     uses: guilhermelinosp/templates/.github/workflows/lib-quality.yml@df9f66533749a4a3a4b59c18a828a179800de096
     with:
       go-version-file: go.mod
+      extra-commands: |
+        set -euo pipefail
+        latest_tag="$(git tag --list 'v[0-9]*' --sort=-version:refname | head -1)"
+        test -n "$latest_tag"
+        old_tree="$RUNNER_TEMP/hellnet-lib-telemetry-$latest_tag"
+        old_api="$RUNNER_TEMP/hellnet-lib-telemetry-$latest_tag.api"
+        new_api="$RUNNER_TEMP/hellnet-lib-telemetry-current.api"
+        git worktree add --detach "$old_tree" "$latest_tag"
+        trap 'git worktree remove "$old_tree" --force' EXIT
+        (
+          cd "$old_tree"
+          go run golang.org/x/exp/cmd/apidiff@latest -m -w "$old_api" github.com/guilhermelinosp/hellnet-lib-telemetry
+        )
+        go run golang.org/x/exp/cmd/apidiff@latest -m -w "$new_api" github.com/guilhermelinosp/hellnet-lib-telemetry
+        set +e
+        apidiff_output="$(go run golang.org/x/exp/cmd/apidiff@latest -m -incompatible "$old_api" "$new_api" 2>&1)"
+        apidiff_status=$?
+        set -e
+        if [ "$apidiff_status" -ne 0 ]; then
+          echo "$apidiff_output"
+          exit "$apidiff_status"
+        fi
+        incompatible="$(printf '%s\n' "$apidiff_output" | grep -v '^Ignoring internal package' || true)"
+        if [ -n "$incompatible" ]; then
+          echo "::error::incompatible public API change detected against $latest_tag"
+          echo "$incompatible"
+          exit 1
+        fi
 
   pr-gate:
     if: always()

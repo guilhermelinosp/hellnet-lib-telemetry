@@ -16,7 +16,6 @@ import (
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
-	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // ContextTracer creates spans using a caller-provided context.
@@ -34,7 +33,8 @@ func (t ContextTracer) Span(name string, fn func(ctx context.Context) error) err
 // buildTracer monta o TracerProvider e o propagador de contexto (sempre registrado globalmente).
 func (t *Telemetry) buildTracer(ctx context.Context, o Options, res *sdkresource.Resource) error {
 	if o.OTLPEndpoint == "" {
-		provider := tracenoop.NewTracerProvider()
+		provider := sdktrace.NewTracerProvider(sdktrace.WithResource(res))
+		t.tp = provider
 		t.tpProvider = provider
 		t.tracer = provider.Tracer(o.ServiceName)
 		otel.SetTracerProvider(provider)
