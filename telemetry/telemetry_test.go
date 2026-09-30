@@ -6,18 +6,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
+	"github.com/guilhermelinosp/hellnet-lib-telemetry/telemetrytest"
 	"go.opentelemetry.io/otel/attribute"
-	sdklog "go.opentelemetry.io/otel/sdk/log"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type testContextKey struct{}
@@ -67,17 +63,16 @@ func TestNewAndClose(t *testing.T) {
 }
 
 func TestInstrumentationLoggerUsesCallerSpanContext(t *testing.T) {
-	tel, _, exporter, _ := newSignalTestTel(t)
+	tel, harness := newTelemetryWithHarness(t)
 	ctx, span := tel.TracerProvider().Tracer("test").Start(context.Background(), "contract-span")
 	tel.Logger("github.com/example/lib").Info(ctx, "hello", "token", "secret")
 	span.End()
 
-	exporter.mu.Lock()
-	defer exporter.mu.Unlock()
-	if len(exporter.records) != 1 {
-		t.Fatalf("records = %d, want 1", len(exporter.records))
+	records := harness.Logs()
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
 	}
-	record := exporter.records[0]
+	record := records[0]
 	if !record.TraceID().IsValid() || !record.SpanID().IsValid() {
 		t.Fatalf("native trace context missing: trace=%s span=%s", record.TraceID(), record.SpanID())
 	}
@@ -89,6 +84,46 @@ func TestInstrumentationLoggerUsesCallerSpanContext(t *testing.T) {
 func TestContractLoggerSanitizesLineBreaks(t *testing.T) {
 	if got := sanitizeLogMessage("before\r\nafter"); got != `before\r\nafter` {
 		t.Fatalf("sanitized message = %q", got)
+	}
+}
+
+func TestContractLoggerHonorsInfoLevelForOTLP(t *testing.T) {
+	tel, harness := newTelemetryWithHarness(t)
+	tel.logLevel = zap.InfoLevel
+	tel.Logger("github.com/example/lib").Debug(context.Background(), "hidden")
+	if got := len(harness.Logs()); got != 0 {
+		t.Fatalf("debug records = %d, want 0", got)
+	}
+}
+
+func TestContractLoggerUsesSanitizedMessageInStdout(t *testing.T) {
+	tel, _ := newTelemetryWithHarness(t)
+	core, logs := observer.New(zapcore.DebugLevel)
+	tel.stdoutLogger = zap.New(core).Sugar()
+	tel.Logger("github.com/example/lib").Info(context.Background(), "line\nbreak")
+	entries := logs.All()
+	if len(entries) != 1 {
+		t.Fatalf("stdout entries = %d, want 1", len(entries))
+	}
+	if got := entries[0].Message; got != `line\nbreak` {
+		t.Fatalf("stdout message = %q", got)
+	}
+}
+
+func TestNoEndpointStillCorrelatesContractLogs(t *testing.T) {
+	tel := newTestTel(t)
+	core, logs := observer.New(zapcore.DebugLevel)
+	tel.stdoutLogger = zap.New(core).Sugar()
+	ctx, span := tel.TracerProvider().Tracer("test").Start(context.Background(), "without-endpoint")
+	tel.Logger("github.com/example/lib").Info(ctx, "correlated")
+	span.End()
+	entries := logs.All()
+	if len(entries) != 1 {
+		t.Fatalf("stdout entries = %d, want 1", len(entries))
+	}
+	got, ok := entries[0].ContextMap()["trace_id"].(string)
+	if !ok || got == "" {
+		t.Fatalf("trace_id missing from local log: %#v", entries[0].ContextMap())
 	}
 }
 
@@ -264,11 +299,11 @@ func TestTraceAndLog(t *testing.T) {
 }
 
 func TestInMemoryProvidersCaptureSignals(t *testing.T) {
-	tel, spans, logs, reader := newSignalTestTel(t)
+	tel, harness := newTelemetryWithHarness(t)
 	ctx := context.Background()
 
 	if err := tel.Trace(ctx).Span("captured-span", func(ctx context.Context) error {
-		tel.Log(ctx).Info("captured-log", "key", "value")
+		tel.Logger("telemetry-test").Info(ctx, "captured-log", "key", "value")
 		return tel.Metric(ctx).Counter("captured-counter", 1, attribute.String("kind", "test"))
 	}); err != nil {
 		t.Fatalf("Trace() erro: %v", err)
@@ -277,23 +312,20 @@ func TestInMemoryProvidersCaptureSignals(t *testing.T) {
 		t.Fatalf("ForceFlush() erro: %v", err)
 	}
 
-	if got := len(spans.Ended()); got != 1 {
+	if got := len(harness.Spans()); got != 1 {
 		t.Fatalf("spans = %d, want 1", got)
 	}
-	if len(logs.records) != 1 {
-		t.Fatalf("logs = %d, want 1", len(logs.records))
+	if len(harness.Logs()) != 1 {
+		t.Fatalf("logs = %d, want 1", len(harness.Logs()))
 	}
-	var data metricdata.ResourceMetrics
-	if err := reader.Collect(ctx, &data); err != nil {
-		t.Fatalf("Collect() erro: %v", err)
-	}
+	data := harness.Metrics(ctx)
 	if len(data.ScopeMetrics) == 0 || len(data.ScopeMetrics[0].Metrics) == 0 {
 		t.Fatal("nenhuma métrica foi coletada")
 	}
 }
 
 func TestCloseFlushesWithCanceledContext(t *testing.T) {
-	tel, spans, _, _ := newSignalTestTel(t)
+	tel, harness := newTelemetryWithHarness(t)
 	if err := tel.Trace(context.Background()).Span("pending-span", func(context.Context) error { return nil }); err != nil {
 		t.Fatalf("Trace() erro: %v", err)
 	}
@@ -302,7 +334,7 @@ func TestCloseFlushesWithCanceledContext(t *testing.T) {
 	if err := tel.Close(ctx); err != nil {
 		t.Fatalf("Close() erro: %v", err)
 	}
-	if got := len(spans.Ended()); got != 1 {
+	if got := len(harness.Spans()); got != 1 {
 		t.Fatalf("spans após Close com ctx cancelado = %d, want 1", got)
 	}
 }
@@ -501,53 +533,24 @@ func TestRetryAfterDelay(t *testing.T) {
 	}
 }
 
-type memoryLogExporter struct {
-	mu      sync.Mutex
-	records []sdklog.Record
-}
-
-func (e *memoryLogExporter) Export(_ context.Context, records []sdklog.Record) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	for _, record := range records {
-		e.records = append(e.records, record.Clone())
-	}
-	return nil
-}
-
-func (*memoryLogExporter) Shutdown(context.Context) error   { return nil }
-func (*memoryLogExporter) ForceFlush(context.Context) error { return nil }
-
-func newSignalTestTel(t *testing.T) (*Telemetry, *tracetest.SpanRecorder, *memoryLogExporter, *sdkmetric.ManualReader) {
+func newTelemetryWithHarness(t *testing.T) (*Telemetry, *telemetrytest.Harness) {
 	t.Helper()
-	spanRecorder := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
-
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	logExporter := &memoryLogExporter{}
-	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExporter)))
-
-	ctx := context.Background()
-	logger := zap.New(otelZapCore{
-		logger: lp.Logger("telemetry-test"),
-		level:  zapcore.DebugLevel,
-		ctx:    ctx,
-	}).Sugar()
+	harness := telemetrytest.New(t)
+	tp := harness.TracerProviderSDK()
+	mp := harness.MeterProviderSDK()
 	tel := &Telemetry{
 		tracer:       tp.Tracer("telemetry-test"),
 		meter:        mp.Meter("telemetry-test"),
-		logger:       logger,
+		logLevel:     zapcore.DebugLevel,
+		logger:       zap.NewNop().Sugar(),
 		stdoutLogger: zap.NewNop().Sugar(),
 		serviceName:  "telemetry-test",
-		lp:           lp,
+		lp:           harness.LoggerProviderSDK(),
 		tp:           tp,
 		mp:           mp,
 		tpProvider:   tp,
 		mpProvider:   mp,
 	}
-	t.Cleanup(func() {
-		_ = tel.Close(context.Background())
-	})
-	return tel, spanRecorder, logExporter, reader
+	t.Cleanup(func() { _ = tel.Close(context.Background()) })
+	return tel, harness
 }

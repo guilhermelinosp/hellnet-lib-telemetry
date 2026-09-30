@@ -55,6 +55,7 @@ import (
 type Telemetry struct {
 	tracer       trace.Tracer
 	meter        metric.Meter
+	logLevel     zapcore.Level
 	logger       *zap.SugaredLogger
 	stdoutLogger *zap.SugaredLogger
 
@@ -221,6 +222,7 @@ func NewWithOptions(ctx context.Context, o Options) (*Telemetry, error) {
 		serviceName:              o.ServiceName,
 		otlpEndpoint:             o.OTLPEndpoint,
 		environment:              o.Environment,
+		logLevel:                 o.LogLevel,
 		includeHealthCheckErrors: o.IncludeHealthCheckErrors,
 	}
 

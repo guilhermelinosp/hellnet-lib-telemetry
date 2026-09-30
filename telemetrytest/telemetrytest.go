@@ -78,8 +78,17 @@ func New(t testing.TB) *Harness {
 // TracerProvider returns the recording tracer provider.
 func (h *Harness) TracerProvider() trace.TracerProvider { return h.tp }
 
+// TracerProviderSDK returns the SDK tracer provider for white-box adapter tests.
+func (h *Harness) TracerProviderSDK() *sdktrace.TracerProvider { return h.tp }
+
 // MeterProvider returns the manual-reader meter provider.
 func (h *Harness) MeterProvider() metric.MeterProvider { return h.mp }
+
+// MeterProviderSDK returns the SDK meter provider for white-box adapter tests.
+func (h *Harness) MeterProviderSDK() *sdkmetric.MeterProvider { return h.mp }
+
+// LoggerProviderSDK returns the SDK logger provider for white-box adapter tests.
+func (h *Harness) LoggerProviderSDK() *sdklog.LoggerProvider { return h.logp }
 
 // Logger returns an in-memory logger for scope.
 func (h *Harness) Logger(scope string) instrument.Logger {
@@ -105,7 +114,7 @@ func (h *Harness) Logs() []sdklog.Record {
 	return out
 }
 
-// Metrics collects and returns the current metric snapshot.
+// Metrics collects and returns the current cumulative metric snapshot.
 func (h *Harness) Metrics(ctx context.Context) metricdata.ResourceMetrics {
 	var out metricdata.ResourceMetrics
 	if err := h.reader.Collect(ctx, &out); err != nil {
@@ -114,15 +123,13 @@ func (h *Harness) Metrics(ctx context.Context) metricdata.ResourceMetrics {
 	return out
 }
 
-// Reset clears spans, logs, and metric state.
+// Reset clears spans and logs. Metrics remain cumulative because instruments
+// keep the same MeterProvider for the lifetime of the harness.
 func (h *Harness) Reset() {
 	h.recorder.Reset()
 	h.mu.Lock()
 	h.logs = nil
 	h.mu.Unlock()
-	_ = h.mp.Shutdown(context.Background())
-	h.reader = sdkmetric.NewManualReader()
-	h.mp = sdkmetric.NewMeterProvider(sdkmetric.WithReader(h.reader))
 }
 
 // FindSpan returns the first finalized span with name.
@@ -133,6 +140,135 @@ func (h *Harness) FindSpan(name string) (sdktrace.ReadOnlySpan, bool) {
 		}
 	}
 	return nil, false
+}
+
+// SpansByName returns all finalized spans with name.
+func (h *Harness) SpansByName(name string) []sdktrace.ReadOnlySpan {
+	spans := make([]sdktrace.ReadOnlySpan, 0)
+	for _, span := range h.Spans() {
+		if span.Name() == name {
+			spans = append(spans, span)
+		}
+	}
+	return spans
+}
+
+// LogsBySeverity returns copies of logs with severity.
+func (h *Harness) LogsBySeverity(severity log.Severity) []sdklog.Record {
+	logs := h.Logs()
+	filtered := make([]sdklog.Record, 0)
+	for _, record := range logs {
+		if record.Severity() == severity {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
+}
+
+// CounterValue returns an int64 sum matching name and the exact attribute set.
+func (h *Harness) CounterValue(ctx context.Context, name string, attrs ...attribute.KeyValue) (int64, bool) {
+	want := attribute.NewSet(attrs...)
+	metrics := h.Metrics(ctx)
+	for _, scope := range metrics.ScopeMetrics {
+		for _, current := range scope.Metrics {
+			if current.Name != name {
+				continue
+			}
+			if sum, ok := current.Data.(metricdata.Sum[int64]); ok {
+				for _, point := range sum.DataPoints {
+					if point.Attributes.Equals(&want) {
+						return point.Value, true
+					}
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// FloatCounterValue returns a float64 sum matching name and the exact attribute set.
+func (h *Harness) FloatCounterValue(ctx context.Context, name string, attrs ...attribute.KeyValue) (float64, bool) {
+	want := attribute.NewSet(attrs...)
+	metrics := h.Metrics(ctx)
+	for _, scope := range metrics.ScopeMetrics {
+		for _, current := range scope.Metrics {
+			if current.Name != name {
+				continue
+			}
+			if sum, ok := current.Data.(metricdata.Sum[float64]); ok {
+				for _, point := range sum.DataPoints {
+					if point.Attributes.Equals(&want) {
+						return point.Value, true
+					}
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// HistogramCount returns the count for a histogram matching name and attributes.
+func (h *Harness) HistogramCount(ctx context.Context, name string, attrs ...attribute.KeyValue) (uint64, bool) {
+	want := attribute.NewSet(attrs...)
+	metrics := h.Metrics(ctx)
+	for _, scope := range metrics.ScopeMetrics {
+		for _, current := range scope.Metrics {
+			if current.Name != name {
+				continue
+			}
+			switch histogram := current.Data.(type) {
+			case metricdata.Histogram[int64]:
+				for _, point := range histogram.DataPoints {
+					if point.Attributes.Equals(&want) {
+						return point.Count, true
+					}
+				}
+			case metricdata.Histogram[float64]:
+				for _, point := range histogram.DataPoints {
+					if point.Attributes.Equals(&want) {
+						return point.Count, true
+					}
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// GaugeValue returns a gauge as float64 matching name and the exact attributes.
+func (h *Harness) GaugeValue(ctx context.Context, name string, attrs ...attribute.KeyValue) (float64, bool) {
+	want := attribute.NewSet(attrs...)
+	metrics := h.Metrics(ctx)
+	for _, scope := range metrics.ScopeMetrics {
+		for _, current := range scope.Metrics {
+			if current.Name != name {
+				continue
+			}
+			switch gauge := current.Data.(type) {
+			case metricdata.Gauge[int64]:
+				for _, point := range gauge.DataPoints {
+					if point.Attributes.Equals(&want) {
+						return float64(point.Value), true
+					}
+				}
+			case metricdata.Gauge[float64]:
+				for _, point := range gauge.DataPoints {
+					if point.Attributes.Equals(&want) {
+						return point.Value, true
+					}
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// ChildOf reports whether child directly descends from parent.
+func ChildOf(parent, child sdktrace.ReadOnlySpan) bool {
+	if parent == nil || child == nil {
+		return false
+	}
+	return child.Parent().IsValid() && child.Parent().TraceID() == parent.SpanContext().TraceID() && child.Parent().SpanID() == parent.SpanContext().SpanID()
 }
 
 // HasAttribute reports whether a span has an attribute with key and value.

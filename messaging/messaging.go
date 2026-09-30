@@ -84,10 +84,17 @@ func NewCarrier(headers []Header) *Carrier {
 	return &copyHeaders
 }
 
-// Get returns the first header matching key case-insensitively.
+// Get prefers an exact lower-case key, then returns the first case-insensitive
+// match. This precedence preserves Kafka headers written by W3C propagators
+// while accepting headers produced by languages with canonicalization.
 func (c *Carrier) Get(key string) string {
 	if c == nil {
 		return ""
+	}
+	for _, header := range *c {
+		if header.Key == strings.ToLower(key) {
+			return string(header.Value)
+		}
 	}
 	for _, header := range *c {
 		if strings.EqualFold(header.Key, key) {
