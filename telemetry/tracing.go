@@ -13,10 +13,10 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/propagation"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // ContextTracer creates spans using a caller-provided context.
@@ -33,14 +33,23 @@ func (t ContextTracer) Span(name string, fn func(ctx context.Context) error) err
 
 // buildTracer monta o TracerProvider e o propagador de contexto (sempre registrado globalmente).
 func (t *Telemetry) buildTracer(ctx context.Context, o Options, res *sdkresource.Resource) error {
+	if o.OTLPEndpoint == "" {
+		provider := tracenoop.NewTracerProvider()
+		t.tpProvider = provider
+		t.tracer = provider.Tracer(o.ServiceName)
+		otel.SetTracerProvider(provider)
+		otel.SetTextMapPropagator(t.Propagator())
+		return nil
+	}
 	tp, err := newTracerProvider(ctx, o, res)
 	if err != nil {
 		return err
 	}
 	t.tp = tp
+	t.tpProvider = tp
 	t.tracer = tp.Tracer(o.ServiceName)
 	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	otel.SetTextMapPropagator(t.Propagator())
 	return nil
 }
 

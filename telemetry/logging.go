@@ -130,11 +130,11 @@ func contextFields(ctx context.Context) []zap.Field {
 
 // Log returns a context-aware structured logger.
 func (t *Telemetry) Log(ctx context.Context) Logger {
-	return zapLogger{l: t.Logger, ctx: ctx, onWrite: t.recordLogError}
+	return zapLogger{l: t.logger, ctx: ctx, onWrite: t.recordLogError}
 }
 func (t *Telemetry) logIn(ctx context.Context, level zapcore.Level, msg string, fields ...zap.Field) {
 	fields = append(contextFields(ctx), fields...)
-	t.Logger.Desugar().Check(level, msg).Write(fields...)
+	t.logger.Desugar().Check(level, msg).Write(fields...)
 }
 
 func (t *Telemetry) recordLogError(ctx context.Context, level zapcore.Level) {
@@ -270,13 +270,15 @@ func (t *Telemetry) buildLogger(ctx context.Context, o Options, res *sdkresource
 		MessageKey: "msg", EncodeTime: zapcore.ISO8601TimeEncoder, EncodeLevel: encodeZapLevel,
 	}), zapcore.AddSync(os.Stdout), o.LogLevel)
 	otelCore := otelZapCore{logger: lp.Logger("zap"), level: o.LogLevel, ctx: ctx}
+	stdoutLogger := zap.New(redactingCore{Core: stdout}).Sugar()
 	logger := zap.New(zapcore.NewTee(redactingCore{Core: stdout}, redactingCore{Core: otelCore}), zap.Hooks(func(entry zapcore.Entry) error {
 		if entry.Level >= zap.ErrorLevel {
 			t.recordLogError(ctx, entry.Level)
 		}
 		return nil
 	}))
-	t.Logger = logger.Sugar()
+	t.logger = logger.Sugar()
+	t.stdoutLogger = stdoutLogger
 	return nil
 }
 

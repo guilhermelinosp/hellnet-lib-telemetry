@@ -31,17 +31,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/guilhermelinosp/hellnet-lib-telemetry/instrument"
 	"github.com/guilhermelinosp/hellnet-lib-telemetry/internal/env"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconvv "go.opentelemetry.io/otel/semconv/v1.30.0"
 	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -49,9 +53,10 @@ import (
 // Telemetry wraps OpenTelemetry primitives (tracer, meter, logger)
 // pre-configured for the service.
 type Telemetry struct {
-	tracer trace.Tracer
-	meter  metric.Meter
-	Logger *zap.SugaredLogger
+	tracer       trace.Tracer
+	meter        metric.Meter
+	logger       *zap.SugaredLogger
+	stdoutLogger *zap.SugaredLogger
 
 	serviceName  string
 	otlpEndpoint string
@@ -64,13 +69,41 @@ type Telemetry struct {
 	logMu          sync.Mutex
 	logErrors      metric.Int64Counter
 
-	lp *sdklog.LoggerProvider
-	tp *sdktrace.TracerProvider
-	mp *sdkmetric.MeterProvider
+	lp         *sdklog.LoggerProvider
+	tp         *sdktrace.TracerProvider
+	mp         *sdkmetric.MeterProvider
+	tpProvider trace.TracerProvider
+	mpProvider metric.MeterProvider
 
 	shutdownOnce             sync.Once
 	shutdownErr              error
 	includeHealthCheckErrors bool
+}
+
+var _ instrument.Instrumentation = (*Telemetry)(nil)
+
+// TracerProvider returns the configured provider, or an OTel no-op provider
+// when trace export is disabled. It never returns nil.
+func (t *Telemetry) TracerProvider() trace.TracerProvider {
+	if t.tpProvider != nil {
+		return t.tpProvider
+	}
+	return tracenoop.NewTracerProvider()
+}
+
+// MeterProvider returns the configured provider, or an OTel no-op provider
+// when metric export is disabled. It never returns nil.
+func (t *Telemetry) MeterProvider() metric.MeterProvider {
+	if t.mpProvider != nil {
+		return t.mpProvider
+	}
+	return metricnoop.NewMeterProvider()
+}
+
+// Propagator returns the same W3C TraceContext+Baggage propagator configured
+// for the application globals.
+func (t *Telemetry) Propagator() propagation.TextMapPropagator {
+	return propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
 }
 
 // Options configures the Telemetry instance.
