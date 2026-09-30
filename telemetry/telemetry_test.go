@@ -6,11 +6,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/guilhermelinosp/hellnet-lib-telemetry/telemetrytest"
 	"go.opentelemetry.io/otel/attribute"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -533,11 +538,57 @@ func TestRetryAfterDelay(t *testing.T) {
 	}
 }
 
-func newTelemetryWithHarness(t *testing.T) (*Telemetry, *telemetrytest.Harness) {
+type testSignalHarness struct {
+	recorder *tracetest.SpanRecorder
+	reader   *sdkmetric.ManualReader
+	logsMu   sync.Mutex
+	logs     []sdklog.Record
+	logp     *sdklog.LoggerProvider
+}
+
+type testLogExporter struct {
+	harness *testSignalHarness
+}
+
+func (e *testLogExporter) Export(_ context.Context, records []sdklog.Record) error {
+	e.harness.logsMu.Lock()
+	defer e.harness.logsMu.Unlock()
+	for _, record := range records {
+		e.harness.logs = append(e.harness.logs, record.Clone())
+	}
+	return nil
+}
+
+func (*testLogExporter) Shutdown(context.Context) error   { return nil }
+func (*testLogExporter) ForceFlush(context.Context) error { return nil }
+
+func (h *testSignalHarness) Spans() []sdktrace.ReadOnlySpan { return h.recorder.Ended() }
+
+func (h *testSignalHarness) Logs() []sdklog.Record {
+	h.logsMu.Lock()
+	defer h.logsMu.Unlock()
+	return append([]sdklog.Record(nil), h.logs...)
+}
+
+func (h *testSignalHarness) Metrics(ctx context.Context) metricdata.ResourceMetrics {
+	var metrics metricdata.ResourceMetrics
+	if err := h.reader.Collect(ctx, &metrics); err != nil {
+		panic(err)
+	}
+	return metrics
+}
+
+func newTelemetryWithHarness(t *testing.T) (*Telemetry, *testSignalHarness) {
 	t.Helper()
-	harness := telemetrytest.New(t)
-	tp := harness.TracerProviderSDK()
-	mp := harness.MeterProviderSDK()
+	harness := &testSignalHarness{recorder: tracetest.NewSpanRecorder(), reader: sdkmetric.NewManualReader()}
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSpanProcessor(harness.recorder),
+	)
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(harness.reader))
+	harness.logp = sdklog.NewLoggerProvider(
+		sdklog.WithProcessor(sdklog.NewSimpleProcessor(&testLogExporter{harness: harness})),
+	)
 	tel := &Telemetry{
 		tracer:       tp.Tracer("telemetry-test"),
 		meter:        mp.Meter("telemetry-test"),
@@ -545,7 +596,7 @@ func newTelemetryWithHarness(t *testing.T) (*Telemetry, *telemetrytest.Harness) 
 		logger:       zap.NewNop().Sugar(),
 		stdoutLogger: zap.NewNop().Sugar(),
 		serviceName:  "telemetry-test",
-		lp:           harness.LoggerProviderSDK(),
+		lp:           harness.logp,
 		tp:           tp,
 		mp:           mp,
 		tpProvider:   tp,

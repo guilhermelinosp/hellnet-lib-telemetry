@@ -8,9 +8,6 @@
   campo `msg` do stdout.
 - Restaurados providers SDK sem exporter quando o endpoint OTLP está vazio,
   mantendo spans locais correlacionáveis sem exportação.
-- `telemetrytest.Reset()` mantém instrumentos e o `MeterProvider`; métricas do
-  harness são cumulativas entre resets.
-- Adicionados helpers de métricas, spans e logs ao `telemetrytest`.
 - Corrigida a precedência de headers minúsculos no carrier Kafka.
 
 ## v1.9.0
@@ -24,7 +21,6 @@
 
 - Adicionados os contratos leves `instrument` e `messaging`, sem dependência do
   SDK OpenTelemetry, Zap, `otelhttp` ou exporters.
-- Adicionado `telemetrytest` para testes de spans, métricas e logs em memória.
 - `*telemetry.Telemetry` agora implementa diretamente `instrument.Instrumentation`.
 - Migração de `telemetry.Client`: libs novas devem receber
   `instrument.Instrumentation`; a API `Client.Trace(context.Context)` foi
