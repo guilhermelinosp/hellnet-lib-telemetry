@@ -242,7 +242,8 @@ func TestInMemoryProvidersCaptureSignals(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Trace() erro: %v", err)
 	}
-	if err := tel.ForceFlush(ctx); err != nil {
+
+  if err := tel.ForceFlush(ctx); err != nil {
 		t.Fatalf("ForceFlush() erro: %v", err)
 	}
 
@@ -275,6 +276,7 @@ func TestCloseFlushesWithCanceledContext(t *testing.T) {
 		t.Fatalf("spans após Close com ctx cancelado = %d, want 1", got)
 	}
 }
+
 
 func TestTracePreservesParent(t *testing.T) {
 	tel := newTestTel(t)
