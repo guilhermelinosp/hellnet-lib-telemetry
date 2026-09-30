@@ -76,7 +76,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer tel.Close(ctx)
+	defer func() { _ = tel.Close(ctx) }()
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /live", tel.Live())
@@ -528,17 +528,18 @@ compor chamadas externas e jobs:
   por contexto;
 - `CircuitBreaker` — estados `closed`, `open` e `half-open`, com limiar de
   falhas e janela de recuperação;
-- `Bulkhead` — limite de concorrência com rejeição rápida quando cheio;
+- `Bulkhead` — limite de concorrência com rejeição rápida quando cheio; `BulkheadWait`
+  oferece espera limitada e respeita o cancelamento do contexto;
 - `Fallback` e `Timeout` — degradação explícita e limite do orçamento da chamada;
 - `Chain` e `Do[T]` — composição de políticas com resultado tipado.
 
 Exemplo:
 
 ```go
-breaker := &resilience.CircuitBreaker{
+breaker := resilience.NewCircuitBreaker(resilience.CircuitBreakerConfig{
     Threshold:   5,
     OpenTimeout: 30 * time.Second,
-}
+})
 policy := resilience.Chain(
     resilience.Fallback(func(ctx context.Context, err error) error {
         return serveFromCache(ctx, err)
@@ -560,9 +561,13 @@ order, err := resilience.Do(ctx, policy, func(ctx context.Context) (*Order, erro
 })
 ```
 
-A ordem recomendada é `bulkhead → circuit breaker → retry → timeout →
-operação`. A aplicação decide o fallback e a classificação de erros; a lib
-não repete automaticamente erros de negócio.
+`Chain` recebe as políticas da mais externa para a mais interna: a primeira
+política executa primeiro e envolve as seguintes. Neste exemplo, a ordem é
+`fallback → circuit breaker → retry → bulkhead → timeout → operação`.
+`Timeout` retorna `resilience.ErrTimeout` quando o prazo da tentativa expira;
+esse erro também satisfaz `errors.Is(err, context.DeadlineExceeded)`. A
+aplicação decide o fallback e a classificação de erros; a lib não repete
+automaticamente erros de negócio.
 
 ```go
 err := tel.WorkerContext(ctx, "process_order",
@@ -602,7 +607,10 @@ Métricas: `db_sql_*` (veja catálogo acima), particionadas por `db=name`.
 Sempre chame para flush dos buffers:
 
 ```go
-defer tel.Close(ctx) // timeout interno de 5s; força flush OTLP
+defer func() { _ = tel.Close(ctx) }() // usa contexto sem cancelamento; timeout padrão de 5s
+
+// Para exportar explicitamente antes do encerramento:
+_ = tel.ForceFlush(ctx)
 ```
 
 ---
@@ -651,7 +659,10 @@ trace.Span("operation", func(ctx context.Context) error {
 | `tel.WorkerContext(ctx, job, fn, extra...)` | Worker com contexto explícito |
 | `tel.HTTPClient(opts...)` | `*http.Client` outbound: trace W3C + retry/backoff + métricas `http_client_*` |
 | `tel.WatchDB(db, name)` | Métricas automáticas do pool SQL (`db_sql_*`) |
-| `tel.Close(ctx)` | Flush OTLP |
+| `tel.ForceFlush(ctx)` | Exporta dados pendentes sem encerrar os providers |
+| `tel.Close(ctx)` | Force flush e encerra providers; usa `context.WithoutCancel(ctx)` e timeout de 5s |
+
+O timeout de encerramento pode ser ajustado com `HELLNET_TELEMETRY_SHUTDOWN_TIMEOUT` (por exemplo, `10s`).
 
 ---
 

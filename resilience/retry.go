@@ -55,7 +55,7 @@ func Retry(config RetryConfig) Policy {
 				if err == nil {
 					return nil
 				}
-				if errors.Is(err, ErrCircuitOpen) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || attempt == maxAttempts {
+				if errors.Is(err, ErrCircuitOpen) || ctx.Err() != nil || attempt == maxAttempts {
 					return err
 				}
 				if config.ShouldRetry != nil && !config.ShouldRetry(err) {

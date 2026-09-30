@@ -30,10 +30,11 @@ func (e *memoryLogExporter) Export(_ context.Context, records []sdklog.Record) e
 func (*memoryLogExporter) Shutdown(context.Context) error   { return nil }
 func (*memoryLogExporter) ForceFlush(context.Context) error { return nil }
 
-func newSignalTestTel(t *testing.T) (*Telemetry, *tracetest.InMemoryExporter, *memoryLogExporter, *sdkmetric.ManualReader) {
+func newSignalTestTel(t *testing.T) (*Telemetry, *tracetest.SpanRecorder, *memoryLogExporter, *sdkmetric.ManualReader) {
 	t.Helper()
-	spanExporter := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExporter))
+	spanRecorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
+
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	logExporter := &memoryLogExporter{}
@@ -57,5 +58,6 @@ func newSignalTestTel(t *testing.T) (*Telemetry, *tracetest.InMemoryExporter, *m
 	t.Cleanup(func() {
 		_ = tel.Close(context.Background())
 	})
-	return tel, spanExporter, logExporter, reader
+	return tel, spanRecorder, logExporter, reader
+
 }

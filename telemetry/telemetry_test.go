@@ -243,7 +243,11 @@ func TestInMemoryProvidersCaptureSignals(t *testing.T) {
 		t.Fatalf("Trace() erro: %v", err)
 	}
 
-	if got := len(spans.GetSpans()); got != 1 {
+	if err := tel.ForceFlush(ctx); err != nil {
+		t.Fatalf("ForceFlush() erro: %v", err)
+	}
+
+	if got := len(spans.Ended()); got != 1 {
 		t.Fatalf("spans = %d, want 1", got)
 	}
 	if len(logs.records) != 1 {
@@ -255,6 +259,21 @@ func TestInMemoryProvidersCaptureSignals(t *testing.T) {
 	}
 	if len(data.ScopeMetrics) == 0 || len(data.ScopeMetrics[0].Metrics) == 0 {
 		t.Fatal("nenhuma métrica foi coletada")
+	}
+}
+
+func TestCloseFlushesWithCanceledContext(t *testing.T) {
+	tel, spans, _, _ := newSignalTestTel(t)
+	if err := tel.Trace(context.Background()).Span("pending-span", func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("Trace() erro: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := tel.Close(ctx); err != nil {
+		t.Fatalf("Close() erro: %v", err)
+	}
+	if got := len(spans.Ended()); got != 1 {
+		t.Fatalf("spans após Close com ctx cancelado = %d, want 1", got)
 	}
 }
 
