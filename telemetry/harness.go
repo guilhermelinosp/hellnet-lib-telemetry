@@ -1,13 +1,9 @@
-// Package telemetrytest provides a small in-memory Instrumentation
-// implementation for library tests. It intentionally depends on the OTel SDK
-// and is not intended for production binaries.
-package telemetrytest
+package telemetry
 
 import (
 	"context"
 	"fmt"
 	"sync"
-	"testing"
 
 	"github.com/guilhermelinosp/hellnet-lib-telemetry/instrument"
 	"go.opentelemetry.io/otel/attribute"
@@ -24,9 +20,10 @@ import (
 
 var _ instrument.Instrumentation = (*Harness)(nil)
 
-// Harness is an in-memory observability backend for a single test.
+// Harness is an in-memory observability backend for a single test. It depends
+// on the OTel SDK and is meant for library tests, not application code.
 type Harness struct {
-	testing testing.TB
+	t TB
 
 	recorder *tracetest.SpanRecorder
 	tp       *sdktrace.TracerProvider
@@ -54,10 +51,17 @@ func (e *logExporter) Export(_ context.Context, records []sdklog.Record) error {
 func (*logExporter) Shutdown(context.Context) error   { return nil }
 func (*logExporter) ForceFlush(context.Context) error { return nil }
 
-// New creates a harness and registers cleanup with t.
-func New(t testing.TB) *Harness {
+// TB is the subset of testing.TB the harness needs.
+type TB interface {
+	Helper()
+	Cleanup(func())
+	Fatalf(format string, args ...any)
+}
+
+// NewHarness creates a harness and registers cleanup with t.
+func NewHarness(t TB) *Harness {
 	t.Helper()
-	h := &Harness{testing: t, recorder: tracetest.NewSpanRecorder()}
+	h := &Harness{t: t, recorder: tracetest.NewSpanRecorder()}
 	h.tp = sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithSpanProcessor(h.recorder),
@@ -109,7 +113,7 @@ func (h *Harness) Logs() []sdklog.Record {
 func (h *Harness) Metrics(ctx context.Context) metricdata.ResourceMetrics {
 	var out metricdata.ResourceMetrics
 	if err := h.reader.Collect(ctx, &out); err != nil {
-		h.testing.Fatalf("collect metrics: %v", err)
+		h.t.Fatalf("collect metrics: %v", err)
 	}
 	return out
 }

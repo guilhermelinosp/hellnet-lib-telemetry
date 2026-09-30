@@ -1,4 +1,4 @@
-package telemetrytest
+package telemetry
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 
 func TestQueryHelpers(t *testing.T) {
 	ctx := context.Background()
-	h := New(t)
+	h := NewHarness(t)
 	s := instrument.NewScope(h, "scope", "example.invalid/none")
 	result := attribute.String("result", "ok")
 
@@ -44,7 +44,7 @@ func TestQueryHelpers(t *testing.T) {
 
 func TestSpanAndLogHelpers(t *testing.T) {
 	ctx := context.Background()
-	h := New(t)
+	h := NewHarness(t)
 	s := instrument.NewScope(h, "scope", "example.invalid/none")
 
 	ctx, parent := s.Tracer.Start(ctx, "parent")
