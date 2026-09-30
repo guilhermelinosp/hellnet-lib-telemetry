@@ -9,6 +9,8 @@
 - Restaurados providers SDK sem exporter quando o endpoint OTLP está vazio,
   mantendo spans locais correlacionáveis sem exportação.
 - Corrigida a precedência de headers minúsculos no carrier Kafka.
+- O pacote `telemetrytest` permanece disponível como compatibilidade
+  deprecated da v1.9.0, mas não é usado pelos testes internos.
 
 ## v1.9.0
 
