@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- Removido o pacote `telemetrytest`. Migração: use `telemetry.NewHarness(t)` do
+  pacote `telemetry` (mesmos métodos; `New` passa a `NewHarness`).
+
 ## v1.9.1 - 2026-09-29
 
 - Corrigido o filtro de `LogLevel` no contrato `instrument.Logger` para stdout
