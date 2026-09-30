@@ -45,8 +45,10 @@ func (l *contractLogger) emit(ctx context.Context, level zapcore.Level, severity
 	msg = sanitizeLogMessage(msg)
 	zapFields, attrs := contractFields(args...)
 	if l.tel.stdoutLogger != nil {
+		// Keep the Zap message literal; caller-controlled text is structured data.
 		fields := append(contextFields(ctx), zapFields...)
-		l.tel.stdoutLogger.Desugar().Check(level, msg).Write(fields...)
+		fields = append(fields, zap.String("message", msg))
+		l.tel.stdoutLogger.Desugar().Check(level, "contract log").Write(fields...)
 	}
 	record := otelLog.Record{}
 	record.SetTimestamp(time.Now())
