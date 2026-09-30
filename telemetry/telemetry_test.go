@@ -86,6 +86,12 @@ func TestInstrumentationLoggerUsesCallerSpanContext(t *testing.T) {
 	}
 }
 
+func TestContractLoggerSanitizesLineBreaks(t *testing.T) {
+	if got := sanitizeLogMessage("before\r\nafter"); got != `before\r\nafter` {
+		t.Fatalf("sanitized message = %q", got)
+	}
+}
+
 func TestMustNew(t *testing.T) {
 	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
 	t.Setenv("HELLNET_TELEMETRY_SERVICE_VERSION", "test")

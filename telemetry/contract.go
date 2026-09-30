@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/guilhermelinosp/hellnet-lib-telemetry/instrument"
@@ -41,6 +42,7 @@ func (l *contractLogger) emit(ctx context.Context, level zapcore.Level, severity
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	msg = sanitizeLogMessage(msg)
 	zapFields, attrs := contractFields(args...)
 	if l.tel.stdoutLogger != nil {
 		fields := append(contextFields(ctx), zapFields...)
@@ -57,6 +59,10 @@ func (l *contractLogger) emit(ctx context.Context, level zapcore.Level, severity
 	if level >= zap.ErrorLevel {
 		l.tel.recordLogError(ctx, level)
 	}
+}
+
+func sanitizeLogMessage(msg string) string {
+	return strings.NewReplacer("\r", `\r`, "\n", `\n`).Replace(msg)
 }
 
 func (t *Telemetry) contractLogger(scope string) instrument.Logger {
