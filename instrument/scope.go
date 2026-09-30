@@ -2,6 +2,7 @@ package instrument
 
 import (
 	"context"
+	"reflect"
 	"runtime/debug"
 	"time"
 
@@ -35,12 +36,23 @@ type Scope struct {
 	name   string
 }
 
+// Resolve returns inst, or Noop() when inst is nil or an interface holding a
+// nil pointer (for example a nil *telemetry.Telemetry). Library constructors
+// call it so callers can pass whatever they have without guarding.
+func Resolve(inst Instrumentation) Instrumentation {
+	if inst == nil {
+		return Noop()
+	}
+	if v := reflect.ValueOf(inst); v.Kind() == reflect.Pointer && v.IsNil() {
+		return Noop()
+	}
+	return inst
+}
+
 // NewScope resolves the tracer, meter and logger for scope, stamping them with
 // the version of modulePath. A nil inst is treated as Noop().
 func NewScope(inst Instrumentation, scope, modulePath string) Scope {
-	if inst == nil {
-		inst = Noop()
-	}
+	inst = Resolve(inst)
 	version := ModuleVersion(modulePath)
 	return Scope{
 		Tracer: inst.TracerProvider().Tracer(scope, trace.WithInstrumentationVersion(version)),
