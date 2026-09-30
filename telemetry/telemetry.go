@@ -122,14 +122,23 @@ func otlpSignalURL(base, signalPath string) string {
 func New(ctx context.Context) (*Telemetry, error) {
 	prefixes := []string{"HELLNET_TELEMETRY_", "HELLNET_"}
 	o := Options{
-		ServiceName:    env.Prefixed(prefixes, "SERVICE", env.String("OTEL_SERVICE_NAME", "telemetry")),
-		ServiceVersion: env.Prefixed(prefixes, "SERVICE_VERSION", env.String("OTEL_SERVICE_VERSION", "")),
-		OTLPEndpoint:   env.Prefixed(prefixes, "ENDPOINT", env.String("OTEL_EXPORTER_OTLP_ENDPOINT", "")),
-		Environment:    env.Prefixed(prefixes, "ENVIRONMENT", env.String("OTEL_DEPLOYMENT_ENVIRONMENT", "")),
-		OTLPHeaders:    parseOTLPHeaders(env.Prefixed(prefixes, "HEADERS", env.String("OTEL_EXPORTER_OTLP_HEADERS", ""))),
+		ServiceName:    prefixed(prefixes, "SERVICE", env.String("OTEL_SERVICE_NAME", "telemetry")),
+		ServiceVersion: prefixed(prefixes, "SERVICE_VERSION", env.String("OTEL_SERVICE_VERSION", "")),
+		OTLPEndpoint:   prefixed(prefixes, "ENDPOINT", env.String("OTEL_EXPORTER_OTLP_ENDPOINT", "")),
+		Environment:    prefixed(prefixes, "ENVIRONMENT", env.String("OTEL_DEPLOYMENT_ENVIRONMENT", "")),
+		OTLPHeaders:    parseOTLPHeaders(prefixed(prefixes, "HEADERS", env.String("OTEL_EXPORTER_OTLP_HEADERS", ""))),
 		LogLevel:       zapcore.InfoLevel,
 	}
 	return NewWithOptions(ctx, o)
+}
+
+func prefixed(prefixes []string, key, fallback string) string {
+	for _, prefix := range prefixes {
+		if value := env.String(prefix+key, ""); value != "" {
+			return value
+		}
+	}
+	return fallback
 }
 
 func parseOTLPHeaders(raw string) map[string]string {
