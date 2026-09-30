@@ -26,7 +26,7 @@ var gcPauseBoundaries = []float64{
 // ContextMeter records measurements using a caller-provided context.
 type ContextMeter struct {
 	tel *Telemetry
-	ctx context.Context
+	ctx context.Context //nolint:containedctx // TODO(fase-4): wrapper legado; a API nova recebe ctx por chamada.
 }
 
 // Counter adds an integer counter measurement.

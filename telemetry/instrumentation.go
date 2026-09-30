@@ -408,7 +408,7 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 		// no handler interno, para correlacionar logs com trace_id.
 		var enriched context.Context
 		inner := http.HandlerFunc(func(w2 http.ResponseWriter, r2 *http.Request) {
-			enriched = r2.Context()
+			enriched = r2.Context() //nolint:fatcontext // TODO(fase-8): preservar o contexto do request interno do otelhttp.
 			next.ServeHTTP(w2, r2)
 		})
 

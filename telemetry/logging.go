@@ -40,7 +40,7 @@ type Logger interface {
 
 type zapLogger struct {
 	l       *zap.SugaredLogger
-	ctx     context.Context
+	ctx     context.Context //nolint:containedctx // TODO(fase-4): manter wrapper legado compatível.
 	onWrite func(context.Context, zapcore.Level)
 }
 
@@ -174,7 +174,7 @@ type otelZapCore struct {
 	logger otelLog.Logger
 	level  zapcore.LevelEnabler
 	fields []zap.Field
-	ctx    context.Context
+	ctx    context.Context //nolint:containedctx // TODO(fase-4): manter contexto do core legado.
 }
 
 func (c otelZapCore) Enabled(level zapcore.Level) bool { return c.level.Enabled(level) }

@@ -18,6 +18,9 @@ linters:
     - nakedret
     - bodyclose
     - noctx
+    - contextcheck
+    - containedctx
+    - fatcontext
     - gosec
   settings:
     gocyclo:
@@ -28,7 +31,6 @@ linters:
           severity: warning
   exclusions:
     paths:
-      - "_test\\.go$"
       - "^_examples/"
 
 formatters:

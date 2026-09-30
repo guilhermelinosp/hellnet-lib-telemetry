@@ -9,9 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
+
+type testContextKey struct{}
 
 func TestOTLPLogBodyIsJSON(t *testing.T) {
 	entry := zapcore.Entry{Level: zap.InfoLevel, Time: time.Date(2026, 9, 28, 22, 0, 0, 0, time.UTC), Message: "example log"}
@@ -78,7 +82,7 @@ func TestNewWithOptionsUsesExplicitOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWithOptions() erro: %v", err)
 	}
-	defer tel.Close(context.Background())
+	defer func() { _ = tel.Close(context.Background()) }()
 	if tel.otlpEndpoint != "http://test-collector:4318" {
 		t.Fatalf("endpoint = %q, want http://test-collector:4318", tel.otlpEndpoint)
 	}
@@ -228,11 +232,37 @@ func TestTraceAndLog(t *testing.T) {
 	}
 }
 
+func TestInMemoryProvidersCaptureSignals(t *testing.T) {
+	tel, spans, logs, reader := newSignalTestTel(t)
+	ctx := context.Background()
+
+	if err := tel.Trace(ctx).Span("captured-span", func(ctx context.Context) error {
+		tel.Log(ctx).Info("captured-log", "key", "value")
+		return tel.Metric(ctx).Counter("captured-counter", 1, attribute.String("kind", "test"))
+	}); err != nil {
+		t.Fatalf("Trace() erro: %v", err)
+	}
+
+	if got := len(spans.GetSpans()); got != 1 {
+		t.Fatalf("spans = %d, want 1", got)
+	}
+	if len(logs.records) != 1 {
+		t.Fatalf("logs = %d, want 1", len(logs.records))
+	}
+	var data metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &data); err != nil {
+		t.Fatalf("Collect() erro: %v", err)
+	}
+	if len(data.ScopeMetrics) == 0 || len(data.ScopeMetrics[0].Metrics) == 0 {
+		t.Fatal("nenhuma métrica foi coletada")
+	}
+}
+
 func TestTracePreservesParent(t *testing.T) {
 	tel := newTestTel(t)
-	parent := context.WithValue(context.Background(), struct{}{}, "parent")
+	parent := context.WithValue(context.Background(), testContextKey{}, "parent")
 	if err := tel.Trace(parent).Span("context-op", func(ctx context.Context) error {
-		if got := ctx.Value(struct{}{}); got != "parent" {
+		if got := ctx.Value(testContextKey{}); got != "parent" {
 			t.Fatalf("parent context value = %v, want parent", got)
 		}
 		return nil
@@ -321,11 +351,15 @@ func TestMiddleware(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/foo")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/foo", nil)
+	if err != nil {
+		t.Fatalf("NewRequest erro: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET erro: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusTeapot {
 		t.Fatalf("status = %d, want 418", resp.StatusCode)
 	}
@@ -333,13 +367,43 @@ func TestMiddleware(t *testing.T) {
 
 func TestHealthEndpoints(t *testing.T) {
 	tel := newTestTel(t)
-	for _, path := range []string{"/live", "/ready", "/health"} {
-		req := httptest.NewRequest("GET", path, nil)
-		w := httptest.NewRecorder()
-		tel.Live().ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Errorf("%s: code = %d, want 200", path, w.Code)
-		}
+	tests := []struct {
+		name string
+		h    http.Handler
+		want int
+	}{
+		{name: "live", h: tel.Live(), want: http.StatusOK},
+		{name: "ready", h: tel.Ready(), want: http.StatusOK},
+		{name: "health", h: tel.Health(), want: http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(context.Background(), "GET", "/"+tt.name, nil)
+			w := httptest.NewRecorder()
+			tt.h.ServeHTTP(w, req)
+			if w.Code != tt.want {
+				t.Fatalf("code = %d, want %d", w.Code, tt.want)
+			}
+		})
+	}
+
+	tel.HealthRegister("failing", func(context.Context) error {
+		return context.Canceled
+	})
+	for _, tt := range []struct {
+		name string
+		h    http.Handler
+	}{
+		{name: "ready", h: tel.Ready()},
+		{name: "health", h: tel.Health()},
+	} {
+		t.Run("failing-"+tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			tt.h.ServeHTTP(w, httptest.NewRequestWithContext(context.Background(), "GET", "/"+tt.name, nil))
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("code = %d, want %d", w.Code, http.StatusServiceUnavailable)
+			}
+		})
 	}
 }
 
@@ -354,7 +418,7 @@ func TestAlloyIntegration(t *testing.T) {
 	t.Setenv("HELLNET_TELEMETRY_ENDPOINT", endpoint)
 	t.Setenv("HELLNET_TELEMETRY_SERVICE", "telemetry-test")
 	tel := MustNew(context.Background())
-	defer tel.Close(context.Background())
+	defer func() { _ = tel.Close(context.Background()) }()
 
 	tel.Log(context.Background()).Info("integration test log", "ok", true)
 	if err := tel.Trace(context.Background()).Span("integration-span", func(ctx context.Context) error {

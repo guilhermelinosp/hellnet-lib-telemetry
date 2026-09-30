@@ -85,7 +85,7 @@ type attemptResult struct {
 	err        error
 	status     int                // 0 quando err != nil
 	elapsed    time.Duration      // duração da passagem pelo transporte
-	ctx        context.Context    // ctx da tentativa (linhagem p/ métricas)
+	ctx        context.Context    //nolint:containedctx // TODO(fase-4): estado interno de uma tentativa; API pública recebe ctx.
 	cancel     context.CancelFunc // cancel do deadline desta tentativa
 	attempts   int                // nº total de tentativas executadas (preenchido no fim)
 	fatal      bool               // erro que NÃO pode ser retentado (ex.: falha ao reconstruir corpo)
