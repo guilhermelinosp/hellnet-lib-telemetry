@@ -267,7 +267,6 @@ func TestInMemoryProvidersCaptureSignals(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Trace() erro: %v", err)
 	}
-
 	if err := tel.ForceFlush(ctx); err != nil {
 		t.Fatalf("ForceFlush() erro: %v", err)
 	}
