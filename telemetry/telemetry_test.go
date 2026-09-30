@@ -6,11 +6,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -53,11 +58,37 @@ func TestNewAndClose(t *testing.T) {
 	if tel.meter == nil {
 		t.Fatal("Meter não deve ser nil")
 	}
-	if tel.Logger == nil {
+	if tel.logger == nil {
 		t.Fatal("Logger não deve ser nil")
 	}
 	if err := tel.Close(context.Background()); err != nil {
 		t.Fatalf("Close() erro: %v", err)
+	}
+}
+
+func TestInstrumentationLoggerUsesCallerSpanContext(t *testing.T) {
+	tel, _, exporter, _ := newSignalTestTel(t)
+	ctx, span := tel.TracerProvider().Tracer("test").Start(context.Background(), "contract-span")
+	tel.Logger("github.com/example/lib").Info(ctx, "hello", "token", "secret")
+	span.End()
+
+	exporter.mu.Lock()
+	defer exporter.mu.Unlock()
+	if len(exporter.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(exporter.records))
+	}
+	record := exporter.records[0]
+	if !record.TraceID().IsValid() || !record.SpanID().IsValid() {
+		t.Fatalf("native trace context missing: trace=%s span=%s", record.TraceID(), record.SpanID())
+	}
+	if got := record.InstrumentationScope().Name; got != "github.com/example/lib" {
+		t.Fatalf("scope = %q", got)
+	}
+}
+
+func TestContractLoggerSanitizesLineBreaks(t *testing.T) {
+	if got := sanitizeLogMessage("before\r\nafter"); got != `before\r\nafter` {
+		t.Fatalf("sanitized message = %q", got)
 	}
 }
 
@@ -447,4 +478,76 @@ func TestAlloyIntegration(t *testing.T) {
 
 	// Tempo para os exporters batchearem e enviarem ao Alloy.
 	time.Sleep(2 * time.Second)
+}
+
+func TestRetryDelayUsesFullJitter(t *testing.T) {
+	for attempt, upper := range map[int]time.Duration{0: 100 * time.Millisecond, 1: 200 * time.Millisecond, 2: 400 * time.Millisecond} {
+		for i := 0; i < 100; i++ {
+			if got := retryDelay(100*time.Millisecond, attempt); got < 0 || got > upper {
+				t.Fatalf("retryDelay(attempt=%d) = %s, want [0,%s]", attempt, got, upper)
+			}
+		}
+	}
+}
+
+func TestRetryAfterDelay(t *testing.T) {
+	resp := &http.Response{Header: http.Header{"Retry-After": []string{"3"}}}
+	if got := retryAfterDelay(resp); got != 3*time.Second {
+		t.Fatalf("retryAfterDelay() = %s, want 3s", got)
+	}
+	resp.Header.Set("Retry-After", "invalid")
+	if got := retryAfterDelay(resp); got != 0 {
+		t.Fatalf("invalid Retry-After = %s, want 0", got)
+	}
+}
+
+type memoryLogExporter struct {
+	mu      sync.Mutex
+	records []sdklog.Record
+}
+
+func (e *memoryLogExporter) Export(_ context.Context, records []sdklog.Record) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, record := range records {
+		e.records = append(e.records, record.Clone())
+	}
+	return nil
+}
+
+func (*memoryLogExporter) Shutdown(context.Context) error   { return nil }
+func (*memoryLogExporter) ForceFlush(context.Context) error { return nil }
+
+func newSignalTestTel(t *testing.T) (*Telemetry, *tracetest.SpanRecorder, *memoryLogExporter, *sdkmetric.ManualReader) {
+	t.Helper()
+	spanRecorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	logExporter := &memoryLogExporter{}
+	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExporter)))
+
+	ctx := context.Background()
+	logger := zap.New(otelZapCore{
+		logger: lp.Logger("telemetry-test"),
+		level:  zapcore.DebugLevel,
+		ctx:    ctx,
+	}).Sugar()
+	tel := &Telemetry{
+		tracer:       tp.Tracer("telemetry-test"),
+		meter:        mp.Meter("telemetry-test"),
+		logger:       logger,
+		stdoutLogger: zap.NewNop().Sugar(),
+		serviceName:  "telemetry-test",
+		lp:           lp,
+		tp:           tp,
+		mp:           mp,
+		tpProvider:   tp,
+		mpProvider:   mp,
+	}
+	t.Cleanup(func() {
+		_ = tel.Close(context.Background())
+	})
+	return tel, spanRecorder, logExporter, reader
 }

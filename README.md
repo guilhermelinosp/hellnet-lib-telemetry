@@ -8,6 +8,28 @@ All three signals are exported via **OTLP over HTTP** (`otlploghttp` /
 `otlpmetrichttp` / `otlptracehttp`). Não há endpoint local de scrape: métricas
 são exportadas exclusivamente via OTLP.
 
+## Como uma lib consome a telemetry
+
+As bibliotecas `hellnet-lib-cache`, `hellnet-lib-kafka` e
+`hellnet-lib-database` devem depender somente de
+`github.com/guilhermelinosp/hellnet-lib-telemetry/instrument` e, quando
+necessário para mensageria, `.../messaging`. Receba `instrument.Instrumentation`
+no construtor; o escopo do tracer/meter/logger deve ser o import path da própria
+lib, e a versão deve ser informada com `WithInstrumentationVersion` usando
+`runtime/debug.ReadBuildInfo`.
+
+Obtenha tracer, meter e logger uma única vez no construtor e crie os
+instrumentos de métrica uma única vez. Se a instrumentação recebida for `nil`,
+substitua-a por `instrument.Noop()`. Nos testes, use
+`telemetrytest.New(t)` para spans, métricas e logs em memória.
+
+## Como um app conecta as libs
+
+O app cria uma única instância de `*telemetry.Telemetry` e passa diretamente o
+contrato para os construtores de cache, Kafka e database. A exportação
+continua exclusivamente por OTLP; as libs não devem criar endpoints locais de
+`/metrics` ou profiling.
+
 ---
 
 ## 🧒 Entenda com 15 anos
@@ -564,6 +586,11 @@ order, err := resilience.Do(ctx, policy, func(ctx context.Context) (*Order, erro
 `Chain` recebe as políticas da mais externa para a mais interna: a primeira
 política executa primeiro e envolve as seguintes. Neste exemplo, a ordem é
 `fallback → circuit breaker → retry → bulkhead → timeout → operação`.
+O circuit breaker deve permanecer **fora** do timeout: assim um timeout é
+observado como falha e pode abrir o circuito. `OnStateChange` é executado fora
+do lock; transições concorrentes podem chegar ao callback fora de ordem, então
+o consumidor deve tratar a notificação como observação, não como sequência
+ordenada.
 `Timeout` retorna `resilience.ErrTimeout` quando o prazo da tentativa expira;
 esse erro também satisfaz `errors.Is(err, context.DeadlineExceeded)`. A
 aplicação decide o fallback e a classificação de erros; a lib não repete

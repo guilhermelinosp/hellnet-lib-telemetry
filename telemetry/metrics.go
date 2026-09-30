@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/metric"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
 )
@@ -67,11 +68,21 @@ func (t *Telemetry) Metric(ctx context.Context) ContextMeter {
 // buildMeter monta o MeterProvider OTLP, as runtime metrics e as métricas de
 // health check. Não há endpoint local de exposição de métricas.
 func (t *Telemetry) buildMeter(ctx context.Context, o Options, res *sdkresource.Resource) error {
+	if o.OTLPEndpoint == "" {
+		provider := metricnoop.NewMeterProvider()
+		t.mpProvider = provider
+		t.meter = provider.Meter(o.ServiceName)
+		otel.SetMeterProvider(provider)
+		t.startRuntimeMetrics()
+		t.registerHealthMetrics()
+		return nil
+	}
 	mp, err := newMeterProvider(ctx, o, res)
 	if err != nil {
 		return err
 	}
 	t.mp = mp
+	t.mpProvider = mp
 	t.meter = mp.Meter(o.ServiceName)
 	otel.SetMeterProvider(mp)
 	t.startRuntimeMetrics()
