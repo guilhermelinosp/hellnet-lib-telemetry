@@ -9,6 +9,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type failingMeter struct {
@@ -86,5 +88,25 @@ func TestResolve(t *testing.T) {
 	}
 	if s := NewScope(typedNil, "scope", "example.invalid/none"); s.Tracer == nil {
 		t.Fatal("NewScope must accept a typed nil")
+	}
+}
+
+func TestWithoutTracingDropsDescendantSpans(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)) // default sampler: ParentBased(AlwaysSample)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	tracer := tp.Tracer("test")
+
+	_, traced := tracer.Start(context.Background(), "traced")
+	traced.End()
+	_, quiet := tracer.Start(WithoutTracing(context.Background()), "quiet")
+	if quiet.IsRecording() {
+		t.Fatal("span under WithoutTracing must not be recorded")
+	}
+	quiet.End()
+
+	spans := rec.Ended()
+	if len(spans) != 1 || spans[0].Name() != "traced" {
+		t.Fatalf("ended spans = %d, want only the traced one", len(spans))
 	}
 }

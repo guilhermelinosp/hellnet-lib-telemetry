@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Adicionado `instrument.WithoutTracing(ctx)`: spans criados sob o contexto retornado
+  não são gravados (pai não amostrado), para polling em background.
+
 ### Breaking
 
 - Removido o pacote `telemetrytest`. Migração: use `telemetry.NewHarness(t)` do

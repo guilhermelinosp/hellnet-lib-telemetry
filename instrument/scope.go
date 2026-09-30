@@ -2,6 +2,7 @@ package instrument
 
 import (
 	"context"
+	"crypto/rand"
 	"reflect"
 	"runtime/debug"
 	"time"
@@ -94,4 +95,19 @@ func Observe(ctx context.Context, count metric.Int64Counter, duration metric.Flo
 	if duration != nil {
 		duration.Record(ctx, time.Since(started).Seconds(), opt)
 	}
+}
+
+// WithoutTracing returns a context whose descendant spans are not recorded. It
+// parents them under an unsampled span context, so samplers that honor the
+// parent decision (the OpenTelemetry SDK default, ParentBased) drop them. Use it
+// for background polling that would otherwise create one trace per tick.
+func WithoutTracing(ctx context.Context) context.Context {
+	var id [24]byte
+	_, _ = rand.Read(id[:])
+	return trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID(id[:16]),
+		SpanID:     trace.SpanID(id[16:]),
+		TraceFlags: 0,
+		Remote:     true,
+	}))
 }
