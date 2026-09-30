@@ -34,7 +34,6 @@ func newSignalTestTel(t *testing.T) (*Telemetry, *tracetest.SpanRecorder, *memor
 	t.Helper()
 	spanRecorder := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spanRecorder))
-
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	logExporter := &memoryLogExporter{}
@@ -59,5 +58,4 @@ func newSignalTestTel(t *testing.T) (*Telemetry, *tracetest.SpanRecorder, *memor
 		_ = tel.Close(context.Background())
 	})
 	return tel, spanRecorder, logExporter, reader
-
 }
