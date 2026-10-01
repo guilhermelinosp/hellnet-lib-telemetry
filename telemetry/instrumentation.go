@@ -421,6 +421,7 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 
 		status := lrw.statusCode
 		dur := time.Since(start)
+		route := routeAttrs(r)
 
 		// Log de request correlacionado ao span do request (nil-safe:
 		// logIn preserva campos de trace no logger Zap.
@@ -433,32 +434,43 @@ func Middleware(tel *Telemetry, next http.Handler) http.Handler {
 		)
 
 		if reqCount != nil {
-			reqCount.Add(enriched, 1, metric.WithAttributes(
+			reqCount.Add(enriched, 1, metric.WithAttributes(append(route,
 				attribute.String("method", r.Method),
 				attribute.Int("status", status),
-			))
+			)...))
 		}
 		if reqDuration != nil {
-			reqDuration.Record(enriched, dur.Seconds(), metric.WithAttributes(
+			reqDuration.Record(enriched, dur.Seconds(), metric.WithAttributes(append(route,
 				attribute.String("method", r.Method),
 				attribute.Int("status", status),
-			))
+			)...))
 		}
 		if respSize != nil {
-			respSize.Record(r.Context(), float64(lrw.size), metric.WithAttributes(
+			respSize.Record(r.Context(), float64(lrw.size), metric.WithAttributes(append(route,
 				attribute.String("method", r.Method),
 				attribute.Int("status", status),
-			))
+			)...))
 		}
 		if reqBodySize != nil && r.ContentLength >= 0 {
-			reqBodySize.Record(r.Context(), float64(r.ContentLength), metric.WithAttributes(
+			reqBodySize.Record(r.Context(), float64(r.ContentLength), metric.WithAttributes(append(route,
 				attribute.String("method", r.Method),
-			))
+			)...))
 		}
 		if reqErrors != nil && status >= 400 {
-			reqErrors.Add(enriched, 1, metric.WithAttributes(attribute.String("method", r.Method)))
+			reqErrors.Add(enriched, 1, metric.WithAttributes(append(route, attribute.String("method", r.Method))...))
 		}
 	})
+}
+
+// routeAttrs returns the http_route attribute for the HTTP server metrics. Only
+// the router pattern is used (bounded cardinality); without one the attribute is
+// omitted instead of falling back to the raw path, which would create a series
+// per id.
+func routeAttrs(r *http.Request) []attribute.KeyValue {
+	if r == nil || r.Pattern == "" {
+		return nil
+	}
+	return []attribute.KeyValue{attribute.String("http_route", r.Pattern)}
 }
 
 // requestPath prefers the router pattern to avoid high-cardinality IDs in

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- As métricas HTTP do `Middleware` (`http_requests_total`, `http_request_duration_seconds`,
+  `http_response_size_bytes`, `http_requests_body_size_bytes`, `http_server_errors_total`)
+  passam a ter o rótulo `http_route` quando o roteador define `r.Pattern`; sem padrão o
+  rótulo é omitido (nunca o path bruto, para não criar uma série por id).
+
 - Adicionado `instrument.WithoutTracing(ctx)`: spans criados sob o contexto retornado
   não são gravados (pai não amostrado), para polling em background.
 
