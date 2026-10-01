@@ -51,11 +51,19 @@ func (l *contractLogger) emit(ctx context.Context, level zapcore.Level, severity
 	if !l.logger.Enabled(ctx, otelLog.EnabledParameters{Severity: severity}) {
 		return
 	}
+	now := time.Now()
 	record := otelLog.Record{}
-	record.SetTimestamp(time.Now())
+	record.SetTimestamp(now)
 	record.SetSeverity(severity)
 	record.SetSeverityText(levelName(level))
-	record.SetBody(attribute.StringValue(msg))
+	// Same JSON body as the application logger (time, level, msg, fields and the
+	// trace/span ids), so library logs read like the rest in Loki instead of
+	// arriving as bare text with their fields hidden in attributes.
+	enc := zapcore.NewMapObjectEncoder()
+	for _, field := range append(contextFields(ctx), zapFields...) {
+		field.AddTo(enc)
+	}
+	record.SetBody(attribute.StringValue(Body(zapcore.Entry{Level: level, Time: now, Message: msg}, enc.Fields)))
 	record.AddAttributes(attrs...)
 	// The context is passed to Emit, so the SDK records native trace/span IDs.
 	l.logger.Emit(ctx, record)

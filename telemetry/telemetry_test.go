@@ -641,3 +641,33 @@ func TestMiddlewareMetricsCarryTheRouteOnlyWhenARouterSetOne(t *testing.T) {
 		t.Fatalf("http_route values = %q, want the router pattern for the routed request and none for the unrouted one (never the raw path)", routes)
 	}
 }
+
+func TestContractLoggerBodyIsTheSameJSONAsTheApplicationLogger(t *testing.T) {
+	tel, harness := newTelemetryWithHarness(t)
+	tp := tel.tp
+	ctx, span := tp.Tracer("t").Start(context.Background(), "op")
+	defer span.End()
+
+	tel.Logger("lib").Warn(ctx, "database slow query", "duration_ms", 812, "operation", "query", "password", "hunter2")
+
+	logs := harness.Logs()
+	if len(logs) != 1 {
+		t.Fatalf("logs = %d, want 1", len(logs))
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(logs[0].Body().AsString()), &body); err != nil {
+		t.Fatalf("body must be JSON, got %q: %v", logs[0].Body().AsString(), err)
+	}
+	if body["msg"] != "database slow query" || body["level"] != "WARN" || body["operation"] != "query" || body["duration_ms"] != float64(812) {
+		t.Fatalf("body = %v", body)
+	}
+	if body["trace_id"] != span.SpanContext().TraceID().String() || body["span_id"] != span.SpanContext().SpanID().String() {
+		t.Fatalf("trace correlation missing from the body: %v", body)
+	}
+	if body["password"] != "[REDACTED]" {
+		t.Fatalf("sensitive field must stay redacted, got %v", body["password"])
+	}
+	if _, ok := body["time"]; !ok {
+		t.Fatal("body must carry time")
+	}
+}
