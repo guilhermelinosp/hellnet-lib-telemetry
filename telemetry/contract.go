@@ -38,10 +38,7 @@ func (l *contractLogger) Error(ctx context.Context, msg string, args ...any) {
 	l.emit(ctx, zap.ErrorLevel, otelLog.SeverityError, msg, args...)
 }
 
-func (l *contractLogger) emit(ctx context.Context, level zapcore.Level, severity otelLog.Severity, msg string, args ...any) { //nolint:contextcheck // the logger contract accepts nil contexts
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (l *contractLogger) emit(ctx context.Context, level zapcore.Level, severity otelLog.Severity, msg string, args ...any) {
 	if !l.tel.logLevel.Enabled(level) {
 		return
 	}

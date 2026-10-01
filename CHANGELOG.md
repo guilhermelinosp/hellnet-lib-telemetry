@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- O logger do contrato `instrument.Logger` e o harness de testes deixam de trocar um
+  `context.Context` nulo por `context.Background()`: o chamador deve passar um contexto real.
+
 - As métricas HTTP do `Middleware` (`http_requests_total`, `http_request_duration_seconds`,
   `http_response_size_bytes`, `http_requests_body_size_bytes`, `http_server_errors_total`)
   passam a ter o rótulo `http_route` quando o roteador define `r.Pattern`; sem padrão o
