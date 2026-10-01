@@ -605,3 +605,39 @@ func newTelemetryWithHarness(t *testing.T) (*Telemetry, *testSignalHarness) {
 	t.Cleanup(func() { _ = tel.Close(context.Background()) })
 	return tel, harness
 }
+
+func TestMiddlewareMetricsCarryTheRouteOnlyWhenARouterSetOne(t *testing.T) {
+	tel, harness := newTelemetryWithHarness(t)
+	inner := Middleware(tel, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("0123456789"))
+	}))
+	routed := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/orders/42", nil)
+	routed.Pattern = "/orders/:id"
+	inner.ServeHTTP(httptest.NewRecorder(), routed)
+	inner.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/raw/777", nil))
+
+	var routes []string
+	for _, scope := range harness.Metrics(context.Background()).ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "http_requests_total" {
+				continue
+			}
+			sum := m.Data.(metricdata.Sum[int64])
+			for _, dp := range sum.DataPoints {
+				if v, ok := dp.Attributes.Value("http_route"); ok {
+					routes = append(routes, v.AsString())
+				} else {
+					routes = append(routes, "")
+				}
+			}
+		}
+	}
+	has := map[string]bool{}
+	for _, r := range routes {
+		has[r] = true
+	}
+	if len(routes) != 2 || !has["/orders/:id"] || !has[""] {
+		t.Fatalf("http_route values = %q, want the router pattern for the routed request and none for the unrouted one (never the raw path)", routes)
+	}
+}
