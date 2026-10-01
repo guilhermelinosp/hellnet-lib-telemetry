@@ -151,10 +151,7 @@ func HasAttribute(span sdktrace.ReadOnlySpan, key attribute.Key, want attribute.
 
 type logger struct{ inner log.Logger }
 
-func (l *logger) emit(ctx context.Context, severity log.Severity, msg string, args ...any) { //nolint:contextcheck // the logger contract accepts nil contexts
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (l *logger) emit(ctx context.Context, severity log.Severity, msg string, args ...any) {
 	record := log.Record{}
 	record.SetSeverity(severity)
 	record.SetSeverityText(severity.String())
