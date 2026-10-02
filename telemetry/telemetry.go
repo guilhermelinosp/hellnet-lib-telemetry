@@ -237,6 +237,9 @@ func NewWithOptions(ctx context.Context, o Options) (*Telemetry, error) {
 		return nil, err
 	}
 
+	// Erros internos do SDK (ex.: falha de export OTLP) vao para o logger estruturado.
+	tel.installErrorHandler(ctx)
+
 	// Meter nunca fica nil (noop se metrics desligado).
 	if tel.meter == nil {
 		tel.meter = otel.GetMeterProvider().Meter("noop")
